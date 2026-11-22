@@ -107,6 +107,17 @@ pub enum Request {
         #[serde(default)]
         model_id: Option<String>,
     },
+    /// Enhances a video or image clip locally.
+    #[serde(rename = "clip.enhance")]
+    ClipEnhance {
+        /// Project folder.
+        path: String,
+        /// Video or image clip.
+        clip_id: String,
+        /// Omit for auto. Clamped to the window limit for the source size.
+        #[cfg_attr(feature = "schema", schemars(range(min = 1.0, max = 4.0)))]
+        scale: Option<f32>,
+    },
     /// Separates the whole source audio into cached singing and accompaniment.
     #[serde(rename = "audio.separateVocals")]
     AudioSeparateVocals {
@@ -335,6 +346,7 @@ impl Request {
             | Request::MediaTranscribe { path, .. }
             | Request::SpeechGenerate { path, .. }
             | Request::AudioSeparateVocals { path, .. }
+            | Request::ClipEnhance { path, .. }
             | Request::TranscriptQuery { path, .. }
             | Request::TemplateSave { path, .. }
             | Request::ExportRun { path, .. }
@@ -815,6 +827,36 @@ pub enum Event {
         /// Failure reason, without input text.
         error: ApiError,
     },
+    /// Clip enhancement reported progress.
+    #[serde(rename = "enhance.progress")]
+    EnhanceProgress {
+        /// Job ID.
+        job: String,
+        /// Project folder.
+        path: String,
+        /// Fraction complete.
+        fraction: f32,
+    },
+    /// The enhanced copy has replaced the clip's source.
+    #[serde(rename = "enhance.done")]
+    EnhanceDone {
+        /// Job ID.
+        job: String,
+        /// Project folder.
+        path: String,
+        /// Enhanced media path.
+        output: String,
+    },
+    /// Enhancement failed or was cancelled.
+    #[serde(rename = "enhance.failed")]
+    EnhanceFailed {
+        /// Job ID.
+        job: String,
+        /// Project folder.
+        path: String,
+        /// Failure or cancellation reason.
+        error: ApiError,
+    },
     /// A vocal separation job reported progress.
     #[serde(rename = "vocals.progress")]
     VocalsProgress {
@@ -964,6 +1006,9 @@ impl Event {
             | Event::SpeechFailed { job, .. }
             | Event::VocalsProgress { job, .. }
             | Event::VocalsDone { job, .. }
+            | Event::EnhanceProgress { job, .. }
+            | Event::EnhanceDone { job, .. }
+            | Event::EnhanceFailed { job, .. }
             | Event::VocalsFailed { job, .. }
             | Event::TranscriptProgress { job, .. }
             | Event::TranscriptDone { job, .. }

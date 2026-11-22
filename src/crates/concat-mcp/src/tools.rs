@@ -464,7 +464,7 @@ pub fn catalogue() -> Vec<Tool> {
         method(
             "ai_status",
             "Check local AI models",
-            "Reports installed Whisper models, TTS voices, Spleeter models, sizes and activity.",
+            "Reports installed Whisper models, voices, Spleeter and Real-ESRGAN, with sizes and job activity.",
             "ai.status",
             Raw,
         )
@@ -480,21 +480,28 @@ pub fn catalogue() -> Vec<Tool> {
         method(
             "speech_generate",
             "Generate speech locally",
-            "Generates local speech (speed 0.5–2) and imports a project WAV into the bin. Poll the job via `export_status` for `mediaId` and `duration`; cancel via `export_cancel`. Download missing models in Settings > Speech; the tool never downloads.",
+            "Generates a local WAV in the bin. Poll `export_status` for `mediaId` and `duration`; cancel via `export_cancel`. Get missing models in Settings > Speech.",
             "speech.generate",
             Raw,
         ),
         method(
             "audio_separate_vocals",
             "Separate singing from accompaniment",
-            "Splits a full audio stream locally. Poll `export_status` for the cache folder, then apply `setClipVoice` (kind `vocals`). Cancel via `export_cancel`. For `modelMissing`, select Voice Isolation > Song in the window inspector.",
+            "Splits audio locally. Poll `export_status`, then apply `setClipVoice` (`vocals`). Cancel via `export_cancel`. For `modelMissing`, select Voice Isolation > Song in the inspector.",
             "audio.separateVocals",
+            Raw,
+        ),
+        method(
+            "clip_enhance",
+            "Enhance a video or image clip",
+            "Local job: caches a copy, then replaces the clip source. Poll `export_status`; cancel via `export_cancel`. For `modelMissing`, use Enhance > Preview in the inspector.",
+            "clip.enhance",
             Raw,
         ),
         method(
             "media_transcribe",
             "Transcribe project media locally",
-            "Transcribes media or a clip locally, replacing its saved transcript. Poll the job via `export_status`; cancel via `export_cancel`. Download missing models in Settings > Transcriber; the tool never downloads.",
+            "Local job replaces the saved transcript. Poll `export_status`; cancel via `export_cancel`. Get models in Settings > Transcriber; the tool never downloads.",
             "media.transcribe",
             Raw,
         )
@@ -502,7 +509,7 @@ pub fn catalogue() -> Vec<Tool> {
         method(
             "transcript_query",
             "Query a saved transcript",
-            "Reads saved text and timed words. Filter using source seconds and a case-insensitive segment substring. No model needed.",
+            "Reads saved text and timed words; filter by source seconds or case-insensitive substring.",
             "transcript.query",
             Raw,
         )
@@ -517,7 +524,7 @@ pub fn catalogue() -> Vec<Tool> {
         method(
             "export_status",
             "Job status",
-            "Polls an export or AI job: state, stage, progress (0–1), output or error. Finished speech returns `mediaId` and `duration` in seconds; vocal separation returns a cache folder.",
+            "Polls export and AI jobs for progress, output or error. Speech returns `mediaId` and `duration` (seconds).",
             "export.status",
             Raw,
         )
@@ -1039,6 +1046,33 @@ mod tests {
     use crate::schema::check;
 
     #[test]
+    fn clip_enhance_lists_window_scale_and_background_job() {
+        let tools = Toolbox::new().list();
+        let tool = tools
+            .iter()
+            .find(|tool| tool["name"] == "clip_enhance")
+            .unwrap();
+        let properties = &tool["inputSchema"]["properties"];
+        assert!(properties.get("clipId").is_some());
+        assert!(
+            tool["inputSchema"]["required"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("clipId"))
+        );
+        let scale = &properties["scale"];
+        assert_eq!(scale["minimum"].as_f64(), Some(1.0));
+        assert_eq!(scale["maximum"].as_f64(), Some(4.0));
+        let description = tool["description"].as_str().unwrap();
+        assert!(
+            description.contains("job")
+                && description.contains("export_status")
+                && description.contains("export_cancel")
+        );
+        assert_eq!(tool["annotations"]["readOnlyHint"], false);
+    }
+
+    #[test]
     fn vocal_separation_lists_its_target_and_cache_workflow() {
         let tools = Toolbox::new().list();
         let tool = tools
@@ -1153,6 +1187,10 @@ mod tests {
                 json!({ "path": "/tmp/Cut", "text": "Hello", "voiceId": 2000, "speed": 1.2 }),
             ),
             ("ai_status", json!({})),
+            (
+                "clip_enhance",
+                json!({ "path": "/tmp/Cut", "clipId": "clip-1", "scale": 1.5 }),
+            ),
             (
                 "audio_separate_vocals",
                 json!({ "path": "/tmp/Cut", "clipId": "clip-1" }),

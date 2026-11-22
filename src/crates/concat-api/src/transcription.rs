@@ -278,7 +278,7 @@ impl Api {
             },
             "speechGeneration": self.speech_status(),
             "vocalSeparation": self.vocal_status(),
-            "videoEnhancement": { "status": "notConnected" },
+            "videoEnhancement": self.enhancement_status(),
         })
     }
 

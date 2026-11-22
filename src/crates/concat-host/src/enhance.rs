@@ -31,7 +31,7 @@
 
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use concat_core::Frame;
@@ -45,6 +45,16 @@ use concat_vision::{ModelId, models};
 
 pub use crate::cutout::Progress;
 use crate::jobs::SingleFlight;
+pub use concat_vision::enhance::scale_of;
+
+/// Returned by the local entry point when the model is missing.
+pub const MODEL_MISSING: &str = "enhancement model is not installed";
+
+/// The on-disk model's ID, size and directory, from the window's model registry.
+pub fn local_model(data: &Path) -> (&'static str, u64, PathBuf) {
+    let id = ModelId::Enhance;
+    (id.name(), id.spec().bytes, models::models_dir(data))
+}
 
 /// The most a preview shows, in output pixels: about what an inspector a
 /// few hundred points wide, on a screen of two pixels a point, shows one
@@ -253,6 +263,7 @@ impl Enhancers {
         &self,
         cancel: &AtomicBool,
         progress: &mut dyn FnMut(Progress),
+        allow_download: bool,
     ) -> Result<Arc<Enhancer>, String> {
         if let Some(loaded) = self
             .model
@@ -264,6 +275,9 @@ impl Enhancers {
         }
         let file = models::model_file(&self.data, ModelId::Enhance);
         if !self.installed() {
+            if !allow_download {
+                return Err(MODEL_MISSING.to_owned());
+            }
             crate::cutout::fetch(ModelId::Enhance, &file, cancel, progress)?;
         }
         let enhancer = Arc::new(fastest(&file)?);
@@ -279,12 +293,37 @@ impl Enhancers {
         request: &EnhanceRequest,
         progress: &mut dyn FnMut(Progress),
     ) -> Result<PathBuf, String> {
+        self.run(request, progress, None)
+    }
+
+    /// Processes a copy using only the installed model, with the caller's stop flag.
+    pub fn enhance_local(
+        &self,
+        request: &EnhanceRequest,
+        cancel: &AtomicBool,
+        progress: &mut dyn FnMut(Progress),
+    ) -> Result<PathBuf, String> {
+        self.run(request, progress, Some(cancel))
+    }
+
+    fn run(
+        &self,
+        request: &EnhanceRequest,
+        progress: &mut dyn FnMut(Progress),
+        local_cancel: Option<&AtomicBool>,
+    ) -> Result<PathBuf, String> {
+        if local_cancel.is_some() && !self.installed() {
+            return Err(MODEL_MISSING.to_owned());
+        }
         if request.target.is_file() {
             return Ok(request.target.clone());
         }
         let job = self.gate.begin("enhance")?;
-        let cancel = job.cancel_handle();
-        let enhancer = self.loaded(&cancel, progress)?;
+        let cancel = local_cancel.unwrap_or_else(|| job.cancel_flag());
+        if local_cancel.is_some() && cancel.load(Ordering::Relaxed) {
+            return Err("enhance cancelled".to_owned());
+        }
+        let enhancer = self.loaded(cancel, progress, local_cancel.is_none())?;
         if let Some(folder) = request.target.parent() {
             std::fs::create_dir_all(folder)
                 .map_err(|error| format!("{}: {error}", folder.display()))?;
@@ -293,7 +332,7 @@ impl Enhancers {
         let result = if request.still {
             still(&enhancer, request)
         } else {
-            footage(&enhancer, request, &job, progress)
+            footage(&enhancer, request, cancel, progress)
         };
         result.map(|()| request.target.clone())
     }
@@ -311,7 +350,7 @@ impl Enhancers {
     ) -> Result<Preview, String> {
         let job = self.gate.begin("enhance")?;
         let cancel = job.cancel_handle();
-        let enhancer = self.loaded(&cancel, progress)?;
+        let enhancer = self.loaded(&cancel, progress, true)?;
         if job.cancelled() {
             return Err("enhance cancelled".to_owned());
         }
@@ -381,7 +420,7 @@ fn still(enhancer: &Enhancer, request: &EnhanceRequest) -> Result<(), String> {
 fn footage(
     enhancer: &Enhancer,
     request: &EnhanceRequest,
-    job: &crate::jobs::Job,
+    cancel: &AtomicBool,
     progress: &mut dyn FnMut(Progress),
 ) -> Result<(), String> {
     let info = concat_media::probe(&request.media_path).map_err(|error| error.to_string())?;
@@ -465,7 +504,7 @@ fn footage(
                 }
             }
             lap(0, &mut t);
-            if job.cancelled() {
+            if cancel.load(Ordering::Relaxed) {
                 return Err("enhance cancelled".to_owned());
             }
             let enhanced = match &last {
@@ -705,6 +744,28 @@ mod tests {
     /// A span of a file enhanced on its own: the copy is the span long, its
     /// picture starts at the span's start, and its sound is there beside
     /// it. Needs the fetched model and ffmpeg on the path.
+    #[test]
+    fn the_local_entry_point_refuses_an_absent_model() {
+        let scratch = tempfile::tempdir().unwrap();
+        let data = scratch.path().join("data");
+        let request = EnhanceRequest {
+            media_path: "not needed".to_owned(),
+            still: true,
+            scale: 2.0,
+            strength: DEFAULT_STRENGTH,
+            target: scratch.path().join("cache/output.png"),
+            span: None,
+        };
+        let error = Enhancers::new(&data)
+            .enhance_local(&request, &AtomicBool::new(false), &mut |_| {
+                panic!("a missing local model must not start work")
+            })
+            .unwrap_err();
+        assert_eq!(error, MODEL_MISSING);
+        assert!(!data.exists());
+        assert!(!request.target.exists());
+    }
+
     #[test]
     fn a_span_is_enhanced_on_its_own() {
         let Some(data) = ["app.concat.editor", "org.standalones.concat"]
