@@ -19,13 +19,13 @@
 //! on it never shows them.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use concat_agent::backend::{self, Backend, Client, Descriptor, Event, Turn};
+use concat_agent::backend::{self, Backend, BackendId, Client, Descriptor, Event, Turn};
 use concat_agent::store::transcript::{Recorder, Transcripts};
 use concat_agent::store::{Chat, Store};
 use concat_agent::vocab::{
@@ -133,8 +133,10 @@ struct Controller {
     /// The thread on screen, once it exists: the first message creates it.
     current: Option<String>,
     lines: Vec<Line>,
-    turn: Option<String>,
-    busy: bool,
+    draft: u64,
+    starting: bool,
+    active: HashMap<String, ActiveTurn>,
+    loading: HashSet<String>,
     /// What each thread was last started or resumed for, so a change of
     /// project or of live mode gives the agent its new surroundings first.
     loaded: HashMap<String, String>,
@@ -156,6 +158,12 @@ struct Controller {
     /// The person is at the composer: a file dropped on the window is
     /// meant for the agent. Ended by a press anywhere else in the editor.
     engaged: bool,
+}
+
+struct ActiveTurn {
+    request: String,
+    turn: Option<String>,
+    pending_user: Option<Item>,
 }
 
 thread_local! {
@@ -334,7 +342,56 @@ fn folder_name(path: &str) -> String {
         .unwrap_or_default()
 }
 
+fn preferred_backend(id: Option<&str>) -> &'static Descriptor {
+    id.and_then(backend::find).unwrap_or(backend::REGISTRY[0])
+}
+
 impl Controller {
+    fn new(store: Store, transcripts: Transcripts, descriptor: &'static Descriptor) -> Self {
+        Self {
+            slots: backend::REGISTRY
+                .iter()
+                .map(|descriptor| (descriptor.id.0, Slot::default()))
+                .collect(),
+            descriptor,
+            model: 0,
+            effort: 0,
+            store,
+            recorder: Recorder::new(transcripts.clone()),
+            transcripts,
+            query: String::new(),
+            current: None,
+            lines: Vec::new(),
+            draft: 0,
+            starting: false,
+            active: HashMap::new(),
+            loading: HashSet::new(),
+            loaded: HashMap::new(),
+            attachments: Vec::new(),
+            live: Arc::new(AtomicBool::new(true)),
+            bridge: None,
+            minted: 0,
+            shown_project: String::new(),
+            engaged: false,
+            skills: Vec::new(),
+            skill_query: String::new(),
+            picked: Vec::new(),
+        }
+    }
+
+    fn busy(&self) -> bool {
+        match &self.current {
+            Some(thread) => self.active.contains_key(thread),
+            None => self.starting,
+        }
+    }
+
+    fn loading(&self) -> bool {
+        self.current
+            .as_ref()
+            .is_some_and(|thread| self.loading.contains(thread))
+    }
+
     fn mint(&mut self, kind: &str) -> String {
         self.minted += 1;
         format!("{kind}{}", self.minted)
@@ -400,7 +457,7 @@ impl Controller {
 
     /// What the agent is doing, in words, while a turn runs.
     fn activity(&self) -> String {
-        if !self.busy {
+        if !self.busy() {
             return String::new();
         }
         match self.lines.last() {
@@ -463,7 +520,8 @@ impl Controller {
         chat.set_backend_locked(self.current.is_some());
         chat.set_has_efforts(self.descriptor.caps.efforts && !self.efforts().is_empty());
         chat.set_has_skills(self.descriptor.caps.skills);
-        chat.set_busy(self.busy);
+        chat.set_busy(self.busy());
+        chat.set_loading(self.loading());
         chat.set_activity(self.activity().into());
         chat.set_live(self.live.load(Ordering::Relaxed));
         chat.set_models(ModelRc::new(VecModel::from(
@@ -600,7 +658,7 @@ impl Controller {
                 }
                 .into(),
                 count: entry.messages as i32,
-                running: self.busy && self.current.as_deref() == Some(entry.id.as_str()),
+                running: self.active.contains_key(&entry.id),
                 current: self.current.as_deref() == Some(entry.id.as_str()),
             })
             .collect();
@@ -688,13 +746,22 @@ impl Controller {
                 // What was running in the conversation on screen is over,
                 // and every conversation of that program is to be taken up
                 // again when it is next used.
-                if self.descriptor.id == from.id {
-                    self.busy = false;
-                    self.turn = None;
-                }
                 let store = &self.store;
-                self.loaded
-                    .retain(|thread, _| store.get(thread).is_none_or(|chat| chat.backend != from.id.0));
+                let other_backend = |thread: &String| {
+                    store.get(thread).is_none_or(|chat| chat.backend != from.id.0)
+                };
+                self.loaded.retain(|thread, _| other_backend(thread));
+                self.active.retain(|thread, _| other_backend(thread));
+                self.loading.retain(other_backend);
+                if self.descriptor.id == from.id {
+                    if self.starting {
+                        self.draft += 1;
+                        self.starting = false;
+                    }
+                    for line in &mut self.lines {
+                        line.streaming = false;
+                    }
+                }
                 self.publish(shell, app);
             }
         }
@@ -747,10 +814,10 @@ impl Controller {
                     ToolState::Failed => 2,
                 };
             }
-            Item::User { text, images, .. } => {
+            Item::User { text, attachments, .. } => {
                 line.role = AgentRole::User;
                 line.text = text.clone();
-                line.images = images
+                line.images = attachments
                     .iter()
                     .map(|path| attached(String::new(), Path::new(path)).shown)
                     .collect();
@@ -768,9 +835,10 @@ impl Controller {
         self.recorder.feed(&update);
         let ours = |thread: &str, current: &Option<String>| current.as_deref() == Some(thread);
         match update {
-            Update::TurnStarted { thread, turn } if ours(&thread, &self.current) => {
-                self.turn = Some(turn);
-                self.busy = true;
+            Update::TurnStarted { thread, turn } => {
+                if let Some(active) = self.active.get_mut(&thread) {
+                    active.turn = Some(turn);
+                }
             }
             Update::TurnEnded {
                 thread,
@@ -778,9 +846,8 @@ impl Controller {
                 error,
                 ..
             } => {
+                self.active.remove(&thread);
                 if ours(&thread, &self.current) {
-                    self.busy = false;
-                    self.turn = None;
                     for line in &mut self.lines {
                         line.streaming = false;
                     }
@@ -923,6 +990,7 @@ impl Controller {
         if !self.descriptor.caps.skills {
             return;
         }
+        let backend_id = self.descriptor.id;
         let cwd = shell
             .studio
             .borrow()
@@ -933,9 +1001,11 @@ impl Controller {
             .unwrap_or_else(|| ".".into());
         backend.skills(
             &cwd,
-            Box::new(|reply| {
+            Box::new(move |reply| {
                 post(move |c, shell, app| {
-                    if let Ok(skills) = reply {
+                    if c.descriptor.id == backend_id
+                        && let Ok(skills) = reply
+                    {
                         c.skills = skills;
                         c.publish(shell, app);
                     }
@@ -952,8 +1022,6 @@ impl Controller {
     }
 
     fn fail_turn(&mut self, reason: &str) {
-        self.busy = false;
-        self.turn = None;
         let id = self.mint("n");
         self.lines.push(Line::notice(&id, reason));
     }
@@ -962,7 +1030,7 @@ impl Controller {
         let Some(backend) = self.slot().backend.clone() else {
             return;
         };
-        if self.busy {
+        if self.busy() || self.loading() {
             return;
         }
         let files = std::mem::take(&mut self.attachments);
@@ -999,13 +1067,12 @@ impl Controller {
         let said_item = Item::User {
             id: format!("{id}-{}", now()),
             text: text.clone(),
-            images: files
+            attachments: files
                 .iter()
-                .filter(|file| file.shown.kind == "image")
                 .map(|file| file.path.to_string_lossy().into_owned())
                 .collect(),
         };
-        let mut said = Line::new(&id, AgentRole::User);
+        let mut said = Line::new(said_item.id(), AgentRole::User);
         said.text = text.clone();
         said.images = skills
             .iter()
@@ -1017,7 +1084,6 @@ impl Controller {
             .chain(files.iter().map(|file| file.shown.clone()))
             .collect();
         self.lines.push(said);
-        self.busy = true;
 
         let (setup, key) = match self.setup(shell) {
             Ok(done) => done,
@@ -1038,57 +1104,79 @@ impl Controller {
             text.chars().take(36).collect()
         };
         let project = setup.cwd.clone();
-        let backend_id = self.descriptor.id.0;
+        let backend_id = self.descriptor.id;
 
-        let asking = Arc::clone(&backend);
-        let keeps_record = !self.descriptor.caps.remote_history;
+        let asking = Arc::downgrade(&backend);
+        let active = ActiveTurn {
+            request: id,
+            turn: None,
+            pending_user: (!self.descriptor.caps.remote_history).then_some(said_item),
+        };
         let go = move |c: &mut Controller, thread: String, key: String| {
-            c.loaded.insert(thread.clone(), key);
-            if keeps_record {
-                c.recorder.watch(&thread);
-                c.recorder.said(&thread, said_item);
+            if let Some(backend) = asking.upgrade() {
+                c.loaded.insert(thread.clone(), key);
+                c.begin_turn(&backend, Turn { thread, inputs, model, effort });
+            } else {
+                c.fail_thread_turn(&thread, &t("agent.turnFailed"));
             }
-            c.begin_turn(&asking, &thread, inputs, model, effort);
         };
         match self.current.clone() {
-            Some(thread) if self.loaded.get(&thread) == Some(&key) => {
-                go(self, thread, key);
-            }
             Some(thread) => {
-                backend.resume(
-                    &thread.clone(),
-                    &setup,
-                    Box::new(move |reply| {
-                        post(move |c, shell, app| {
-                            match reply {
-                                Ok(_) => go(c, thread, key),
-                                Err(error) => c.fail_turn(&error),
-                            }
-                            c.publish(shell, app);
-                        });
-                    }),
-                );
+                let request = active.request.clone();
+                self.active.insert(thread.clone(), active);
+                if self.loaded.get(&thread) == Some(&key) {
+                    go(self, thread, key);
+                } else {
+                    backend.resume(
+                        &thread.clone(),
+                        &setup,
+                        Box::new(move |reply| {
+                            post(move |c, shell, app| {
+                                if !c.is_turn_request(&thread, &request) {
+                                    return;
+                                }
+                                match reply {
+                                    Ok(_) => go(c, thread, key),
+                                    Err(error) => c.fail_thread_turn(&thread, &error),
+                                }
+                                c.publish(shell, app);
+                            });
+                        }),
+                    );
+                }
             }
             None => {
+                self.starting = true;
+                let draft = self.draft;
                 self.remember(shell);
                 backend.start(
                     &setup,
                     Box::new(move |reply| {
                         post(move |c, shell, app| {
+                            let on_screen = c.is_starting_draft(draft, backend_id);
+                            if on_screen {
+                                c.starting = false;
+                            }
                             match reply {
                                 Ok(thread) => {
-                                    c.current = Some(thread.clone());
+                                    // The submitted message still belongs to
+                                    // this backend even after leaving its draft.
+                                    if on_screen {
+                                        c.current = Some(thread.clone());
+                                    }
                                     c.store.put(Chat {
                                         id: thread.clone(),
                                         title,
                                         project,
                                         updated: now(),
                                         messages: 1,
-                                        backend: backend_id.to_owned(),
+                                        backend: backend_id.0.to_owned(),
                                     });
+                                    c.active.insert(thread.clone(), active);
                                     go(c, thread, key);
                                 }
-                                Err(error) => c.fail_turn(&error),
+                                Err(error) if on_screen => c.fail_turn(&error),
+                                Err(error) => log::warn!("agent: could not start a chat: {error}"),
                             }
                             c.publish(shell, app);
                         });
@@ -1099,27 +1187,31 @@ impl Controller {
         self.publish(shell, app);
     }
 
-    fn begin_turn(
-        &mut self,
-        backend: &Arc<dyn Backend>,
-        thread: &str,
-        inputs: Vec<Input>,
-        model: Option<String>,
-        effort: Option<String>,
-    ) {
-        let turn = Turn {
-            thread: thread.to_owned(),
-            inputs,
-            model,
-            effort,
+    fn begin_turn(&mut self, backend: &Arc<dyn Backend>, turn: Turn) {
+        let thread = turn.thread.clone();
+        let Some(active) = self.active.get_mut(&thread) else {
+            return;
         };
+        let request = active.request.clone();
+        if let Some(item) = active.pending_user.take() {
+            self.recorder.watch(&thread);
+            self.recorder.said(&thread, item);
+        }
         backend.send(
             turn,
             Box::new(move |reply| {
                 post(move |c, shell, app| {
+                    if !c.is_turn_request(&thread, &request) {
+                        return;
+                    }
                     match reply {
-                        Ok(turn) => c.turn = turn,
-                        Err(error) => c.fail_turn(&error),
+                        Ok(Some(turn)) => {
+                            if let Some(active) = c.active.get_mut(&thread) {
+                                active.turn = Some(turn);
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(error) => c.fail_thread_turn(&thread, &error),
                     }
                     c.publish(shell, app);
                 });
@@ -1127,22 +1219,37 @@ impl Controller {
         );
     }
 
+    fn is_turn_request(&self, thread: &str, request: &str) -> bool {
+        self.active.get(thread).is_some_and(|active| active.request == request)
+    }
+
+    fn is_starting_draft(&self, draft: u64, backend: BackendId) -> bool {
+        self.starting && self.draft == draft && self.descriptor.id == backend
+    }
+
+    fn fail_thread_turn(&mut self, thread: &str, error: &str) {
+        self.active.remove(thread);
+        if self.current.as_deref() == Some(thread) {
+            self.fail_turn(error);
+        }
+    }
+
     fn stop(&mut self) {
-        let (Some(backend), Some(thread), Some(turn)) =
-            (&self.slot().backend, &self.current, &self.turn)
-        else {
+        let (Some(backend), Some(thread)) = (&self.slot().backend, &self.current) else {
             return;
         };
-        backend.interrupt(thread, turn);
+        if let Some(turn) = self.active.get(thread).and_then(|active| active.turn.as_deref()) {
+            backend.interrupt(thread, turn);
+        }
     }
 
     fn new_chat(&mut self) {
+        self.draft += 1;
+        self.starting = false;
         self.current = None;
         self.lines.clear();
         self.attachments.clear();
         self.picked.clear();
-        self.turn = None;
-        self.busy = false;
     }
 
     /// Makes `descriptor`'s program the one the conversation on screen is
@@ -1178,20 +1285,32 @@ impl Controller {
         self.enter(descriptor, shell, app);
         self.current = Some(chat.id.clone());
         if !descriptor.caps.remote_history {
-            // What this program does not keep is read from the record.
-            self.recorder.watch(&chat.id);
-            let (items, _damaged) = self.transcripts.read(&chat.id);
-            if items.is_empty() && chat.messages > 0 {
-                let id = self.mint("n");
-                self.lines
-                    .push(Line::notice(&id, &tf("agent.recordMissing", &[&descriptor.name])));
-            }
-            for item in &items {
-                self.put_item(item, true);
-            }
+            self.restore_record(&chat);
         }
         self.take_up(shell, app);
         self.publish(shell, app);
+    }
+
+    fn restore_record(&mut self, chat: &Chat) {
+        self.recorder.watch(&chat.id);
+        let (mut items, _) = self.transcripts.read(&chat.id);
+        let active = self.active.get(&chat.id);
+        let streaming = active.is_some();
+        items.extend(active.and_then(|turn| turn.pending_user.clone()));
+        if items.is_empty() && chat.messages > 0 {
+            let id = self.mint("n");
+            self.lines.push(Line::notice(
+                &id,
+                &tf("agent.recordMissing", &[&self.descriptor.name]),
+            ));
+        }
+        for item in &items {
+            self.put_item(item, true);
+        }
+        let pending = self.recorder.in_progress(&chat.id).to_vec();
+        for item in &pending {
+            self.put_item(item, !streaming);
+        }
     }
 
     /// Takes the conversation on screen up again in its program, once the
@@ -1201,6 +1320,9 @@ impl Controller {
         let Some(thread) = self.current.clone() else {
             return;
         };
+        if self.loading.contains(&thread) {
+            return;
+        }
         let Some(descriptor) = self
             .store
             .get(&thread)
@@ -1216,7 +1338,9 @@ impl Controller {
             return;
         };
         // What is already taken up, and shown from the record, is left.
-        if !descriptor.caps.remote_history && self.loaded.contains_key(&thread) {
+        if !descriptor.caps.remote_history
+            && (self.loaded.contains_key(&thread) || self.active.contains_key(&thread))
+        {
             return;
         }
         let (setup, key) = match self.setup(shell) {
@@ -1228,25 +1352,28 @@ impl Controller {
             }
         };
         let remote_history = descriptor.caps.remote_history;
+        self.loading.insert(thread.clone());
         backend.resume(
             &thread.clone(),
             &setup,
             Box::new(move |reply| {
                 post(move |c, shell, app| {
-                    if c.current.as_deref() != Some(thread.as_str()) {
+                    if !c.loading.remove(&thread) {
                         return;
                     }
+                    let on_screen = c.current.as_deref() == Some(thread.as_str());
                     match reply {
                         Ok(items) => {
                             c.loaded.insert(thread, key);
-                            if remote_history {
+                            if on_screen && remote_history {
                                 c.lines.clear();
                                 for item in &items {
                                     c.put_item(item, true);
                                 }
                             }
                         }
-                        Err(error) => c.fail_turn(&error),
+                        Err(error) if on_screen => c.fail_turn(&error),
+                        Err(_) => {}
                     }
                     c.publish(shell, app);
                 });
@@ -1264,6 +1391,8 @@ impl Controller {
         self.recorder.forget(id);
         self.store.remove(id);
         self.loaded.remove(id);
+        self.loading.remove(id);
+        self.active.remove(id);
         if self.current.as_deref() == Some(id) {
             self.new_chat();
         }
@@ -1285,48 +1414,17 @@ pub fn install(app: &App) {
             .unwrap_or_else(|| std::env::temp_dir().join("eloncut-agent-chats")),
     );
     // A new conversation is with the program the last one was with.
-    let descriptor = dirs
-        .as_ref()
-        .map(crate::prefs::Preferences::load)
-        .and_then(|prefs| prefs.agent_backend)
-        .and_then(|id| backend::find(&id))
-        .unwrap_or(backend::REGISTRY[0]);
-    let mut slots: HashMap<&'static str, Slot> = backend::REGISTRY
-        .iter()
-        .map(|descriptor| (descriptor.id.0, Slot::default()))
-        .collect();
+    let prefs = dirs.as_ref().map(crate::prefs::Preferences::load);
+    let descriptor = preferred_backend(prefs.as_ref().and_then(|prefs| prefs.agent_backend.as_deref()));
+    let mut controller = Controller::new(store, transcripts, descriptor);
     let preview = std::env::var("CONCAT_AGENT_STATUS").ok();
-    if let Some(slot) = slots.get_mut(descriptor.id.0) {
+    if let Some(slot) = controller.slots.get_mut(descriptor.id.0) {
         slot.link = match preview.as_deref() {
             Some("missing") => Link::Missing,
             Some("failed") => Link::Failed(String::new()),
             _ => Link::Idle,
         };
     }
-    let controller = Controller {
-        slots,
-        descriptor,
-        model: 0,
-        effort: 0,
-        store,
-        recorder: Recorder::new(transcripts.clone()),
-        transcripts,
-        query: String::new(),
-        current: None,
-        lines: Vec::new(),
-        turn: None,
-        busy: false,
-        loaded: HashMap::new(),
-        attachments: Vec::new(),
-        live: Arc::new(AtomicBool::new(true)),
-        bridge: None,
-        minted: 0,
-        shown_project: String::new(),
-        engaged: false,
-        skills: Vec::new(),
-        skill_query: String::new(),
-        picked: Vec::new(),
-    };
     CONTROLLER.with(|slot| *slot.borrow_mut() = Some(controller));
 
     let chat = app.global::<AgentChat>();
@@ -1343,6 +1441,10 @@ pub fn install(app: &App) {
     chat.on_new_session(|| {
         with(|c, shell, app| {
             c.new_chat();
+            let descriptor = preferred_backend(shell.studio.borrow().prefs.agent_backend.as_deref());
+            if descriptor.id != c.descriptor.id {
+                c.enter(descriptor, shell, app);
+            }
             c.publish(shell, app);
         });
     });
@@ -1454,7 +1556,7 @@ pub fn install(app: &App) {
         with(|c, shell, app| {
             // Only before the first message: a conversation stays with the
             // program it began with.
-            if c.current.is_some() || c.busy {
+            if c.current.is_some() || c.busy() {
                 return;
             }
             let Some(descriptor) = backend::REGISTRY.get(index.max(0) as usize).copied() else {
@@ -1557,6 +1659,93 @@ pub fn attach(shell: &Shell, app: &App, paths: Vec<PathBuf>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_start_reply_only_belongs_to_its_draft_and_backend() {
+        let codex = preferred_backend(None);
+        let acp = preferred_backend(Some("antigravity"));
+        assert_ne!(codex.id, acp.id);
+        let transcripts = Transcripts::in_folder(&std::env::temp_dir());
+        let mut controller = Controller::new(Store::in_memory(), transcripts, codex);
+        controller.starting = true;
+        let first_draft = controller.draft;
+        assert!(controller.is_starting_draft(first_draft, codex.id));
+        assert!(!controller.is_starting_draft(first_draft, acp.id));
+
+        controller.new_chat();
+        controller.descriptor = acp;
+        controller.starting = true;
+        assert!(!controller.is_starting_draft(first_draft, codex.id));
+        assert!(controller.is_starting_draft(controller.draft, acp.id));
+
+        controller.new_chat();
+        controller.descriptor = codex;
+        controller.starting = true;
+        assert!(!controller.is_starting_draft(first_draft, codex.id));
+    }
+
+    #[test]
+    fn reopening_a_local_chat_restores_its_stream_and_turn_id() {
+        let folder = std::env::temp_dir().join(format!("concat-active-chat-{}", std::process::id()));
+        let transcripts = Transcripts::in_folder(&folder);
+        let acp = preferred_backend(Some("antigravity"));
+        let mut controller = Controller::new(Store::in_memory(), transcripts, acp);
+        let chat = Chat {
+            id: "chat".into(),
+            title: "A clip".into(),
+            project: String::new(),
+            messages: 1,
+            updated: 0,
+            backend: acp.id.0.into(),
+        };
+        controller.recorder.watch(&chat.id);
+        controller.recorder.said(&chat.id, Item::User {
+            id: "user".into(),
+            text: String::new(),
+            attachments: vec!["/clip.mov".into()],
+        });
+        controller.current = Some(chat.id.clone());
+        controller.active.insert(chat.id.clone(), ActiveTurn {
+            request: "request".into(),
+            turn: None,
+            pending_user: None,
+        });
+        controller.new_chat();
+        controller.update(Update::TurnStarted { thread: chat.id.clone(), turn: "turn".into() });
+        controller.update(Update::AgentWords {
+            thread: chat.id.clone(),
+            item: "response".into(),
+            words: "First part".into(),
+        });
+        assert!(!controller.busy());
+
+        controller.current = Some(chat.id.clone());
+        controller.restore_record(&chat);
+        assert!(controller.busy());
+        assert_eq!(controller.active[&chat.id].turn.as_deref(), Some("turn"));
+        assert_eq!(controller.lines.len(), 2);
+        assert_eq!(controller.lines[0].images[0].name.as_str(), "clip.mov");
+        assert_eq!(controller.lines[1].text, "First part");
+        assert!(controller.lines[1].streaming);
+
+        controller.update(Update::AgentWords {
+            thread: chat.id.clone(),
+            item: "response".into(),
+            words: " and the end.".into(),
+        });
+        controller.update(Update::TurnEnded {
+            thread: chat.id.clone(),
+            turn: "turn".into(),
+            status: "completed".into(),
+            error: None,
+        });
+        assert!(!controller.busy());
+        assert_eq!(controller.lines.len(), 2);
+        assert_eq!(controller.lines[1].text, "First part and the end.");
+        assert!(!controller.lines[1].streaming);
+        controller.transcripts.remove(&chat.id);
+        let _ = std::fs::remove_dir(&folder);
+    }
 
     #[test]
     fn instructions_read_the_embedded_guide_before_editing_in_every_mode() {

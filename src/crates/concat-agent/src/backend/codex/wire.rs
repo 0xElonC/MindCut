@@ -231,7 +231,7 @@ pub fn read_item(item: &Value) -> Option<Item> {
             Some(Item::User {
                 id,
                 text: text.join("\n"),
-                images,
+                attachments: images,
             })
         }
         "agentMessage" => Some(Item::Agent {
@@ -517,7 +517,7 @@ mod tests {
         assert_eq!(items.len(), 3);
         assert_eq!(
             items[0],
-            Item::User { id: "u".into(), text: "hello".into(), images: vec!["/i.png".into()] }
+            Item::User { id: "u".into(), text: "hello".into(), attachments: vec!["/i.png".into()] }
         );
         assert_eq!(items[2].id(), "r");
     }

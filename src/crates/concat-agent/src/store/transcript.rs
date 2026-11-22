@@ -10,7 +10,7 @@
 //! one bad line never hides the rest of a conversation.
 
 use std::collections::{HashMap, HashSet};
-use std::io::Write;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
@@ -56,25 +56,40 @@ impl Transcripts {
         }
         let mut file = std::fs::OpenOptions::new()
             .create(true)
+            .read(true)
             .append(true)
             .open(&path)
             .map_err(|error| format!("{}: {error}", path.display()))?;
-        // One write, so that a line is not split between two.
-        file.write_all(text.as_bytes())
-            .and_then(|()| file.flush())
-            .map_err(|error| format!("{}: {error}", path.display()))
+        let mut append = || -> std::io::Result<()> {
+            file.lock()?;
+            if file.metadata()?.len() > 0 {
+                file.seek(SeekFrom::End(-1))?;
+                let mut tail = [0];
+                file.read_exact(&mut tail)?;
+                if tail[0] != b'\n' {
+                    text.insert(0, '\n');
+                }
+            }
+            // The separator and the new entries are appended together.
+            file.write_all(text.as_bytes())?;
+            file.flush()
+        };
+        append().map_err(|error| format!("{}: {error}", path.display()))
     }
 
     /// Everything in a conversation's record, in order, and how many lines
     /// could not be read. A conversation with no record has none.
     pub fn read(&self, chat: &str) -> (Vec<Item>, usize) {
-        let Ok(text) = std::fs::read_to_string(self.file(chat)) else {
+        let Ok(bytes) = std::fs::read(self.file(chat)) else {
             return (Vec::new(), 0);
         };
         let mut items = Vec::new();
         let mut skipped = 0;
-        for line in text.lines().filter(|line| !line.trim().is_empty()) {
-            match serde_json::from_str::<Value>(line)
+        for line in bytes
+            .split(|&byte| byte == b'\n')
+            .filter(|line| !line.iter().all(u8::is_ascii_whitespace))
+        {
+            match serde_json::from_slice::<Value>(line)
                 .ok()
                 .and_then(|value| Item::from_json(&value))
             {
@@ -133,6 +148,10 @@ impl Recorder {
 
     pub fn watching(&self, chat: &str) -> bool {
         self.watched.contains(chat)
+    }
+
+    pub fn in_progress(&self, chat: &str) -> &[Item] {
+        self.turns.get(chat).map(Vec::as_slice).unwrap_or_default()
     }
 
     /// The person said something: written now.
@@ -243,10 +262,9 @@ mod tests {
         // A line cut short, as a run that ended mid-write leaves it, then
         // more written after it by a later run.
         let path = records.file("c");
-        let mut text = std::fs::read_to_string(&path).unwrap();
-        text.push_str("{\"type\":\"agent\",\"id\":\"cut\",\"te");
-        text.push('\n');
-        std::fs::write(&path, text).unwrap();
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes.extend_from_slice(b"{\"type\":\"agent\",\"id\":\"cut\",\"text\":\"\xe5");
+        std::fs::write(&path, bytes).unwrap();
         records.append("c", &[said("b", "two")]).unwrap();
         let (items, skipped) = records.read("c");
         assert_eq!(items.iter().map(Item::id).collect::<Vec<_>>(), ["a", "b"]);
@@ -279,7 +297,12 @@ mod tests {
         let records = Transcripts::in_folder(&folder);
         let mut recorder = Recorder::new(records.clone());
         recorder.watch("c");
-        recorder.said("c", Item::User { id: "u".into(), text: "cut".into(), images: vec![] });
+        let user = Item::User {
+            id: "u".into(),
+            text: String::new(),
+            attachments: vec!["/clip.mov".into()],
+        };
+        recorder.said("c", user.clone());
         recorder.feed(&Update::ThoughtWords { thread: "c".into(), item: "r".into(), words: "hm".into() });
         recorder.feed(&words("c", "m1", "Hel"));
         recorder.feed(&Update::ItemStarted {
@@ -298,8 +321,10 @@ mod tests {
             },
         });
         // The person's words are down already; the agent's wait for the end.
-        assert_eq!(records.read("c").0.iter().map(Item::id).collect::<Vec<_>>(), ["u"]);
+        assert_eq!(records.read("c").0, [user]);
+        assert_eq!(recorder.in_progress("c").iter().map(Item::id).collect::<Vec<_>>(), ["r", "m1", "t"]);
         recorder.feed(&ended("c"));
+        assert!(recorder.in_progress("c").is_empty());
         let (items, _) = records.read("c");
         assert_eq!(items.iter().map(Item::id).collect::<Vec<_>>(), ["u", "r", "m1", "t"]);
         assert_eq!(items[2], Item::Agent { id: "m1".into(), text: "Hello".into() });

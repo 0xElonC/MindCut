@@ -80,8 +80,8 @@ pub enum Item {
     User {
         id: String,
         text: String,
-        /// Pictures that went with it.
-        images: Vec<String>,
+        /// Paths of files that went with it.
+        attachments: Vec<String>,
     },
     Agent {
         id: String,
@@ -115,8 +115,8 @@ impl Item {
     /// The item as one line of a conversation's record.
     pub fn to_json(&self) -> Value {
         match self {
-            Item::User { id, text, images } => {
-                json!({ "type": "user", "id": id, "text": text, "images": images })
+            Item::User { id, text, attachments } => {
+                json!({ "type": "user", "id": id, "text": text, "attachments": attachments })
             }
             Item::Agent { id, text } => json!({ "type": "agent", "id": id, "text": text }),
             Item::Reasoning { id, text } => json!({ "type": "reasoning", "id": id, "text": text }),
@@ -140,8 +140,9 @@ impl Item {
             "user" => Some(Item::User {
                 id,
                 text: text("text")?,
-                images: value
-                    .get("images")
+                attachments: value
+                    .get("attachments")
+                    .or_else(|| value.get("images"))
                     .and_then(Value::as_array)
                     .into_iter()
                     .flatten()
@@ -231,9 +232,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn old_user_records_with_image_paths_still_read_back() {
+        let item = Item::from_json(&json!({ "type": "user", "id": "u", "text": "", "images": ["/old.png"] }));
+        assert!(matches!(item, Some(Item::User { attachments, .. }) if attachments == ["/old.png"]));
+    }
+
+    #[test]
     fn every_kind_of_item_reads_back_as_it_was_written() {
         let items = [
-            Item::User { id: "u".into(), text: "cut it\nshort".into(), images: vec!["/a b/c.png".into()] },
+            Item::User { id: "u".into(), text: "cut it\nshort".into(), attachments: vec!["/a b/c.png".into(), "/clip.mov".into()] },
             Item::Agent { id: "a".into(), text: "ok \"quoted\" 剪好了".into() },
             Item::Reasoning { id: "r".into(), text: "thinking".into() },
             Item::Tool {

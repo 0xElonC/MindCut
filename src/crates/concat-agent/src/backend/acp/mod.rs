@@ -15,7 +15,7 @@
 //! record (`store::transcript`). A session taken up again replays what was
 //! said before; that is dropped, since the record already holds it.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
@@ -58,11 +58,23 @@ struct Shared {
 struct State {
     readers: HashMap<String, wire::Reader>,
     /// Sessions being taken up again: what they replay is not new.
-    loading: HashSet<String>,
+    loading: HashMap<String, Vec<Done<Vec<Item>>>>,
+    active: HashMap<String, ActiveTurn>,
     /// The model and depth a session was last set to.
     chosen: HashMap<String, (Option<String>, Option<String>)>,
     /// Numbers the items of words, across every session.
     seq: u64,
+}
+
+struct ActiveTurn {
+    id: String,
+    submission: Arc<Mutex<Submission>>,
+}
+
+enum Submission {
+    Queued,
+    Submitted,
+    Cancelled,
 }
 
 impl Shared {
@@ -74,6 +86,11 @@ impl Shared {
 
     fn emit(&self, update: Update) {
         (self.on_event)(Event::Update(update));
+    }
+
+    fn end_turn(&self, thread: String, turn: String, status: String, error: Option<String>) {
+        self.state().active.remove(&thread);
+        self.emit(Update::TurnEnded { thread, turn, status, error });
     }
 }
 
@@ -145,7 +162,7 @@ fn answering(shared: &Arc<Shared>) -> impl Fn(Incoming, &Writer) + Send + 'stati
             };
             let updates = {
                 let mut state = shared.state();
-                if state.loading.contains(session) {
+                if state.loading.contains_key(session) {
                     return;
                 }
                 let State { readers, seq, .. } = &mut *state;
@@ -221,6 +238,7 @@ struct Sending {
     shared: Arc<Shared>,
     thread: String,
     turn: String,
+    submission: Arc<Mutex<Submission>>,
     /// `(option, value)` still to be set.
     changes: Vec<(&'static str, String)>,
     prompt: Value,
@@ -229,16 +247,29 @@ struct Sending {
 impl Sending {
     fn run(mut self) {
         let Some(peer) = self.peer.upgrade() else { return };
+        let gate = Arc::clone(&self.submission);
+        let mut submission = gate.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if matches!(*submission, Submission::Cancelled) {
+            drop(submission);
+            self.shared.end_turn(self.thread, self.turn, "interrupted".into(), None);
+            return;
+        }
         if self.changes.is_empty() {
             let thread = self.thread.clone();
             let shared = Arc::clone(&self.shared);
             let turn = self.turn.clone();
+            // Hold the gate until the prompt is written so a concurrent
+            // Stop either skips this prompt or writes cancel after it.
+            *submission = Submission::Submitted;
+            self.shared.state().readers.remove(&thread);
             peer.call("session/prompt", self.prompt, move |reply| {
                 let (status, error) = wire::turn_end(&reply);
-                shared.emit(Update::TurnEnded { thread, turn, status, error });
+                shared.end_turn(thread, turn, status, error);
             });
             return;
         }
+        // A write failure can run this callback inline.
+        drop(submission);
         let (option, value) = self.changes.remove(0);
         let params = wire::config_params(&self.thread, option, &value);
         peer.call("session/set_config_option", params, move |reply| {
@@ -278,28 +309,52 @@ impl Backend for Acp {
         // that reads the program: it is dropped until the answer is in.
         {
             let mut state = self.shared.state();
-            state.loading.insert(thread.to_owned());
+            if let Some(waiters) = state.loading.get_mut(thread) {
+                waiters.push(done);
+                return;
+            }
+            if state.active.contains_key(thread) {
+                drop(state);
+                done(Err("Cannot load a session during a turn".into()));
+                return;
+            }
+            state.loading.insert(thread.to_owned(), vec![done]);
         }
         let shared = Arc::clone(&self.shared);
         let thread = thread.to_owned();
         self.peer.call("session/load", params, move |reply| {
-            {
+            let waiters = {
                 let mut state = shared.state();
-                state.loading.remove(&thread);
                 state.readers.remove(&thread);
                 // What the session is set to is not known after a load.
                 state.chosen.remove(&thread);
-            }
+                state.loading.remove(&thread).unwrap_or_default()
+            };
             // The history is the app's own record, not the program's.
-            done(reply.map(|_| Vec::new()));
+            for done in waiters {
+                done(reply.as_ref().map(|_| Vec::new()).map_err(String::clone));
+            }
         });
     }
 
     fn send(&self, turn: Turn, done: Done<Option<String>>) {
         let id = format!("turn-{}", self.shared.turns.fetch_add(1, Ordering::Relaxed) + 1);
+        let submission = Arc::new(Mutex::new(Submission::Queued));
         let mut changes = Vec::new();
         {
-            let state = self.shared.state();
+            let mut state = self.shared.state();
+            if state.active.contains_key(&turn.thread) || state.loading.contains_key(&turn.thread) {
+                drop(state);
+                done(Err("The session is busy".into()));
+                return;
+            }
+            state.active.insert(
+                turn.thread.clone(),
+                ActiveTurn {
+                    id: id.clone(),
+                    submission: Arc::clone(&submission),
+                },
+            );
             let (model, effort) = state.chosen.get(&turn.thread).cloned().unwrap_or_default();
             if let Some(wanted) = turn.model.as_ref().filter(|wanted| Some(*wanted) != model.as_ref()) {
                 changes.push(("model", wanted.clone()));
@@ -321,13 +376,31 @@ impl Backend for Acp {
             prompt: wire::prompt_params(&turn.thread, blocks),
             thread: turn.thread,
             turn: id,
+            submission,
             changes,
         }
         .run();
     }
 
-    fn interrupt(&self, thread: &str, _turn: &str) {
-        self.peer.notify("session/cancel", wire::cancel_params(thread));
+    fn interrupt(&self, thread: &str, turn: &str) {
+        let submission = self.shared.state()
+            .active
+            .get(thread)
+            .filter(|active| active.id == turn)
+            .map(|active| Arc::clone(&active.submission));
+        let Some(submission) = submission else { return };
+        let mut submission = submission.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        match *submission {
+            Submission::Queued => *submission = Submission::Cancelled,
+            Submission::Submitted => {
+                // The prompt may have ended while Stop waited for the gate.
+                let state = self.shared.state();
+                if state.active.get(thread).is_some_and(|active| active.id == turn) {
+                    self.peer.notify("session/cancel", wire::cancel_params(thread));
+                }
+            }
+            Submission::Cancelled => {}
+        }
     }
 
     fn rename(&self, _thread: &str, _title: &str) {}
@@ -390,6 +463,12 @@ mod tests {
         granted: Vec<Value>,
     }
 
+    struct Pause {
+        method: &'static str,
+        arrived: mpsc::Sender<()>,
+        release: mpsc::Receiver<()>,
+    }
+
     fn options() -> Value {
         json!([
             { "id": "model", "currentValue": "gemini-fake", "options": [
@@ -408,6 +487,7 @@ mod tests {
         mut replies: std::io::PipeWriter,
         end: Arc<AtomicBool>,
         seen: Arc<Mutex<Seen>>,
+        mut pause: Option<Pause>,
     ) {
         std::thread::spawn(move || {
             let (lines, line_reader) = mpsc::channel::<String>();
@@ -447,6 +527,11 @@ mod tests {
                 };
                 let params = message.get("params").cloned().unwrap_or(Value::Null);
                 seen.lock().unwrap().calls.push((method.to_owned(), params.clone()));
+                if pause.as_ref().is_some_and(|pause| pause.method == method) {
+                    let pause = pause.take().unwrap();
+                    pause.arrived.send(()).unwrap();
+                    pause.release.recv_timeout(Duration::from_secs(5)).unwrap();
+                }
                 let reply = |result: Value| json!({ "id": id, "result": result });
                 match method {
                     "initialize" => say(reply(json!({ "protocolVersion": 1, "agentCapabilities": {} }))),
@@ -471,6 +556,11 @@ mod tests {
                         match words {
                             "stall" => {}
                             "slow" => waiting = id,
+                            "plain" => {
+                                say(update(&session, json!({ "sessionUpdate": "agent_message_chunk",
+                                    "content": { "type": "text", "text": "plain answer" } })));
+                                say(reply(json!({ "stopReason": "end_turn" })));
+                            }
                             _ => {
                                 say(update(&session, json!({ "sessionUpdate": "something_new" })));
                                 say(json!({ "id": "ask-1", "method": "session/request_permission",
@@ -483,9 +573,9 @@ mod tests {
                                     "content": { "type": "text", "text": "Hel" } })));
                                 say(update(&session, json!({ "sessionUpdate": "tool_call", "toolCallId": "c1",
                                     "name": "mcp_eloncut_concat_version", "status": "in_progress",
-                                    "rawInput": { "toolSummary": "Check the version" } })));
+                                    "rawInput": { "toolSummary": "Check the version", "detail": true } })));
                                 say(update(&session, json!({ "sessionUpdate": "tool_call_update", "toolCallId": "c1",
-                                    "name": "mcp_eloncut_concat_version", "status": "completed" })));
+                                    "status": "completed" })));
                                 say(update(&session, json!({ "sessionUpdate": "agent_message_chunk",
                                     "content": { "type": "text", "text": "lo" } })));
                                 say(reply(json!({ "stopReason": "end_turn" })));
@@ -506,11 +596,21 @@ mod tests {
     }
 
     fn rig() -> Rig {
+        rig_with_pause(None)
+    }
+
+    fn paused_rig(method: &'static str) -> (Rig, mpsc::Receiver<()>, mpsc::Sender<()>) {
+        let (arrived, notice) = mpsc::channel();
+        let (release, proceed) = mpsc::channel();
+        (rig_with_pause(Some(Pause { method, arrived, release: proceed })), notice, release)
+    }
+
+    fn rig_with_pause(pause: Option<Pause>) -> Rig {
         let (requests_in, requests_out) = std::io::pipe().unwrap();
         let (replies_in, replies_out) = std::io::pipe().unwrap();
         let end = Arc::new(AtomicBool::new(false));
         let seen = Arc::new(Mutex::new(Seen::default()));
-        fake(requests_in, replies_out, Arc::clone(&end), Arc::clone(&seen));
+        fake(requests_in, replies_out, Arc::clone(&end), Arc::clone(&seen), pause);
         let (send, events) = mpsc::channel();
         let send = Mutex::new(send);
         let connected = connect_over(
@@ -678,6 +778,69 @@ mod tests {
     }
 
     #[test]
+    fn simultaneous_resumes_share_one_load_and_suppress_its_replay() {
+        let (rig, arrived, release) = paused_rig("session/load");
+        let backend = rig.connected.backend.as_ref();
+        let (done, replies) = mpsc::channel();
+        let first = done.clone();
+        backend.resume("s1", &setup(), Box::new(move |reply| first.send(reply).unwrap()));
+        arrived.recv_timeout(Duration::from_secs(5)).unwrap();
+        backend.resume("s1", &setup(), Box::new(move |reply| done.send(reply).unwrap()));
+        release.send(()).unwrap();
+        for _ in 0..2 {
+            assert!(replies.recv_timeout(Duration::from_secs(5)).unwrap().unwrap().is_empty());
+        }
+        ask(|done| backend.send(say("s1", "plain", None, None), done)).unwrap();
+        let seen = wait_for(&rig.events, |u| matches!(u, Update::TurnEnded { .. }));
+        let words: Vec<_> = seen.iter().filter_map(|u| match u {
+            Update::AgentWords { words, .. } => Some(words.as_str()),
+            _ => None,
+        }).collect();
+        assert_eq!(words, ["plain answer"]);
+        let calls = rig.seen.lock().unwrap();
+        assert_eq!(calls.calls.iter().filter(|(method, _)| method == "session/load").count(), 1);
+    }
+
+    #[test]
+    fn stopping_during_configuration_skips_the_prompt() {
+        let (rig, arrived, release) = paused_rig("session/set_config_option");
+        let backend = rig.connected.backend.as_ref();
+        let turn = ask(|done| backend.send(say("s1", "stall", Some("gemini-other"), Some("high")), done))
+            .unwrap()
+            .unwrap();
+        arrived.recv_timeout(Duration::from_secs(5)).unwrap();
+        backend.interrupt("s1", &turn);
+        release.send(()).unwrap();
+        let seen = wait_for(&rig.events, |u| matches!(u, Update::TurnEnded { .. }));
+        assert!(matches!(seen.last(), Some(Update::TurnEnded { turn: id, status, .. })
+            if id == &turn && status == "interrupted"));
+
+        // Complete another prompt so any earlier calls have reached the fake.
+        ask(|done| backend.send(say("s1", "plain", None, None), done)).unwrap();
+        wait_for(&rig.events, |u| matches!(u, Update::TurnEnded { .. }));
+        let seen = rig.seen.lock().unwrap();
+        let methods: Vec<_> = seen.calls.iter().skip(3).map(|(method, _)| method.as_str()).collect();
+        assert_eq!(methods, ["session/set_config_option", "session/prompt"]);
+    }
+
+    #[test]
+    fn consecutive_prompts_start_separate_message_items() {
+        let rig = rig();
+        let backend = rig.connected.backend.as_ref();
+        let mut items = Vec::new();
+        for _ in 0..2 {
+            ask(|done| backend.send(say("s1", "plain", None, None), done)).unwrap();
+            let seen = wait_for(&rig.events, |u| matches!(u, Update::TurnEnded { .. }));
+            items.extend(seen.into_iter().filter_map(|u| match u {
+                Update::AgentWords { item, .. } => Some(item),
+                _ => None,
+            }));
+        }
+        assert_eq!(items.len(), 2);
+        assert_ne!(items[0], items[1]);
+    }
+
+    #[test]
     fn a_thought_a_tool_and_the_answer_are_items_of_their_own() {
         let rig = rig();
         let backend = rig.connected.backend.as_ref();
@@ -697,6 +860,11 @@ mod tests {
         assert!(seen.iter().any(|update| matches!(
             update,
             Update::ItemStarted { item: Item::Tool { summary, .. }, .. } if summary == "Check the version"
+        )));
+        assert!(seen.iter().any(|update| matches!(
+            update,
+            Update::ItemDone { item: Item::Tool { name, summary, input, .. }, .. }
+                if name == "concat_version" && summary == "Check the version" && input == r#"{"detail":true}"#
         )));
     }
 }

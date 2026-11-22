@@ -131,6 +131,7 @@ export global AgentChat {
     in property <string> project;
     /// A turn is running: the send button is a stop button until it ends.
     in property <bool> busy;
+    in property <bool> loading;
     /// What the agent is doing while it is: "Thinking", "Running clips_split".
     in property <string> activity;
     /// The agent edits the project that is open in the window, as you watch,
@@ -1304,7 +1305,7 @@ component Composer inherits Rectangle {
 
     property <string> draft;
     property <bool> has-text: root.draft != "";
-    property <bool> can-send: root.enabled && !AgentChat.busy
+    property <bool> can-send: root.enabled && !AgentChat.busy && !AgentChat.loading
         && (root.has-text || AgentChat.attachments.length > 0);
     /// Two lines to start with, growing to eight and scrolling after.
     property <length> field-h: Math.max(40px, Math.min(160px, input.preferred-height + 4px));
@@ -1449,7 +1450,7 @@ component Composer inherits Rectangle {
                     snug: true;
                     options: AgentChat.backends;
                     current: AgentChat.backend-index;
-                    enabled: root.enabled && !AgentChat.backend-locked && !AgentChat.busy;
+                    enabled: !AgentChat.backend-locked && !AgentChat.busy;
                     changed(index) => {
                         AgentChat.backend-index = index;
                         AgentChat.backend-changed(index);
@@ -1524,7 +1525,6 @@ export component AgentPane inherits Pane {
             IconButton {
                 glyph: Glyph.plus;
                 label: I18n.t("agent.newChat");
-                enabled: AgentChat.status == AgentStatus.ready;
                 clicked => {
                     root.listing = false;
                     AgentChat.new-session();

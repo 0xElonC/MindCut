@@ -8,6 +8,7 @@
 //! chat's vocabulary ([`Update`]), so that each is testable without a
 //! process.
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use serde_json::{Map, Value, json};
@@ -277,6 +278,15 @@ enum Open {
 #[derive(Debug, Default)]
 pub struct Reader {
     open: Option<(Open, String)>,
+    tools: HashMap<String, ToolCall>,
+}
+
+#[derive(Debug)]
+struct ToolCall {
+    name: String,
+    summary: Option<String>,
+    input: String,
+    state: ToolState,
 }
 
 impl Reader {
@@ -340,39 +350,51 @@ impl Reader {
         let Some(id) = update.get("toolCallId").and_then(Value::as_str) else {
             return Vec::new();
         };
-        let status = update.get("status").and_then(Value::as_str);
-        let state = match status {
-            Some("completed") => ToolState::Done,
-            Some("failed") => ToolState::Failed,
-            _ => ToolState::Running,
-        };
-        let name = update
+        let tool = self.tools.entry(id.to_owned()).or_insert_with(|| ToolCall {
+            name: "tool".into(),
+            summary: None,
+            input: String::new(),
+            state: ToolState::Running,
+        });
+        if let Some(status) = update.get("status").and_then(Value::as_str) {
+            tool.state = match status {
+                "completed" => ToolState::Done,
+                "failed" => ToolState::Failed,
+                _ => ToolState::Running,
+            };
+        }
+        if let Some(name) = update
             .get("name")
-            .or_else(|| update.get("title"))
             .and_then(Value::as_str)
-            .map(|name| (profile.tool_name)(name).to_owned())
-            .unwrap_or_else(|| "tool".into());
-        let mut given = update.get("rawInput").cloned().unwrap_or(Value::Null);
-        // The agent's own line about the call: the best summary there is.
-        let said = given
-            .as_object_mut()
-            .and_then(|object| object.remove("toolSummary"))
-            .and_then(|text| text.as_str().map(str::to_owned));
-        let input = match &given {
-            Value::Object(object) if !object.is_empty() => given.to_string(),
-            _ => String::new(),
-        };
+            .or_else(|| update.get("title").and_then(Value::as_str))
+        {
+            tool.name = (profile.tool_name)(name).to_owned();
+        }
+        if let Some(mut given) = update.get("rawInput").cloned() {
+            // The agent's own line about the call: the best summary there is.
+            if let Some(said) = given
+                .as_object_mut()
+                .and_then(|object| object.remove("toolSummary"))
+                .and_then(|text| text.as_str().map(str::to_owned))
+            {
+                tool.summary = Some(said);
+            }
+            tool.input = match &given {
+                Value::Object(object) if !object.is_empty() => given.to_string(),
+                _ => String::new(),
+            };
+        }
         let item = Item::Tool {
             id: id.to_owned(),
-            summary: said.unwrap_or_else(|| shorten(&input, 80)),
-            name,
-            input,
+            summary: tool.summary.clone().unwrap_or_else(|| shorten(&tool.input, 80)),
+            name: tool.name.clone(),
+            input: tool.input.clone(),
             // The protocol says how a call went, not what it answered.
             output: String::new(),
-            state,
+            state: tool.state,
         };
         let thread = thread.to_owned();
-        if change && state != ToolState::Running {
+        if change && tool.state != ToolState::Running {
             vec![Update::ItemDone { thread, item }]
         } else {
             vec![Update::ItemStarted { thread, item }]
@@ -576,12 +598,13 @@ mod tests {
         let failed = reader.read(
             &mut seq,
             "s",
-            &json!({ "sessionUpdate": "tool_call_update", "toolCallId": "c1", "status": "failed", "name": "mcp_eloncut_clips_split" }),
+            &json!({ "sessionUpdate": "tool_call_update", "toolCallId": "c1", "status": "failed" }),
             &profile(),
         );
         assert!(matches!(
             failed.as_slice(),
-            [Update::ItemDone { item: Item::Tool { state: ToolState::Failed, .. }, .. }]
+            [Update::ItemDone { item: Item::Tool { state: ToolState::Failed, name, summary, input, .. }, .. }]
+                if name == "clips_split" && summary == "Split the clip" && input == r#"{"clipIds":["a"]}"#
         ));
         // An update that is not yet the end changes the line in place.
         let working = reader.read(
