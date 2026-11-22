@@ -51,6 +51,8 @@
   "agent.suggestCaptions": "Dodaj napisy i tytuł do osi czasu",
   "agent.suggestHighlight": "Zrób 30-sekundowe skrót z tego materiału",
   "agent.suggestSilence": "Wytnij ciszę z mojego klipu",
+  "agent.switchProvider": "Switch providers. If this chat has messages, switching starts a new chat.",
+  "agent.switchProviderBusy": "Wait for the reply to finish before switching providers.",
   "agent.thinking": "Myśli",
   "agent.title": "Agent",
   "agent.toolsUsed": "Użyto {0} narzędzi",

@@ -51,6 +51,8 @@
   "agent.suggestCaptions": "टाइमलाइन में कैप्शन और शीर्षक जोड़ो",
   "agent.suggestHighlight": "इस फ़ुटेज से 30 सेकंड की हाइलाइट बनाओ",
   "agent.suggestSilence": "मेरी क्लिप से शांत हिस्से काट दो",
+  "agent.switchProvider": "Switch providers. If this chat has messages, switching starts a new chat.",
+  "agent.switchProviderBusy": "Wait for the reply to finish before switching providers.",
   "agent.thinking": "सोच रहा है",
   "agent.title": "एजेंट",
   "agent.toolsUsed": "{0} टूल इस्तेमाल किए",

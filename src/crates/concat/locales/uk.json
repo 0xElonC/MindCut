@@ -51,6 +51,8 @@
   "agent.suggestCaptions": "Додати субтитри та заголовок на монтажний стіл",
   "agent.suggestHighlight": "Зробити 30-секундний ролик із цього матеріалу",
   "agent.suggestSilence": "Вирізати тишу з мого кліпу",
+  "agent.switchProvider": "Switch providers. If this chat has messages, switching starts a new chat.",
+  "agent.switchProviderBusy": "Wait for the reply to finish before switching providers.",
   "agent.thinking": "Думає",
   "agent.title": "Агент",
   "agent.toolsUsed": "Використано інструментів: {0}",

@@ -51,6 +51,8 @@
   "agent.suggestCaptions": "Добавить субтитры и заголовок на таймлайн",
   "agent.suggestHighlight": "Сделать 30-секундный ролик из этих кадров",
   "agent.suggestSilence": "Вырезать паузы из моего клипа",
+  "agent.switchProvider": "Switch providers. If this chat has messages, switching starts a new chat.",
+  "agent.switchProviderBusy": "Wait for the reply to finish before switching providers.",
   "agent.thinking": "Думает",
   "agent.title": "Агент",
   "agent.toolsUsed": "Использовано инструментов: {0}",

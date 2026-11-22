@@ -51,6 +51,8 @@
   "agent.suggestCaptions": "给时间线加字幕和标题",
   "agent.suggestHighlight": "用这些素材剪一个 30 秒精华",
   "agent.suggestSilence": "剪掉素材里的静音片段",
+  "agent.switchProvider": "切换服务商。如果当前对话已有消息，切换后会开启新对话。",
+  "agent.switchProviderBusy": "请等回复结束后再切换服务商。",
   "agent.thinking": "思考中",
   "agent.title": "智能体",
   "agent.toolsUsed": "使用了 {0} 个工具",

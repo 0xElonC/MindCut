@@ -51,6 +51,8 @@
   "agent.suggestCaptions": "টাইমলাইনে ক্যাপশন ও শিরোনাম যোগ করুন",
   "agent.suggestHighlight": "এই ফুটেজ থেকে ৩০ সেকেন্ডের হাইলাইট বানান",
   "agent.suggestSilence": "আমার ক্লিপ থেকে নীরব অংশ কেটে দিন",
+  "agent.switchProvider": "Switch providers. If this chat has messages, switching starts a new chat.",
+  "agent.switchProviderBusy": "Wait for the reply to finish before switching providers.",
   "agent.thinking": "ভাবছে",
   "agent.title": "এজেন্ট",
   "agent.toolsUsed": "{0}টি টুল ব্যবহার করেছে",

@@ -51,6 +51,8 @@
   "agent.suggestCaptions": "Ajouter des sous-titres et un titre à la timeline",
   "agent.suggestHighlight": "Faire un résumé de 30 secondes de ces rushs",
   "agent.suggestSilence": "Supprimer les silences de mon clip",
+  "agent.switchProvider": "Switch providers. If this chat has messages, switching starts a new chat.",
+  "agent.switchProviderBusy": "Wait for the reply to finish before switching providers.",
   "agent.thinking": "Réflexion en cours",
   "agent.title": "Agent",
   "agent.toolsUsed": "{0} outils utilisés",

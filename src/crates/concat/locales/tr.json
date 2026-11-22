@@ -51,6 +51,8 @@
   "agent.suggestCaptions": "Zaman çizelgesine altyazı ve başlık ekle",
   "agent.suggestHighlight": "Bu görüntülerden 30 saniyelik bir özet çıkar",
   "agent.suggestSilence": "Klibimdeki sessizlikleri kes",
+  "agent.switchProvider": "Switch providers. If this chat has messages, switching starts a new chat.",
+  "agent.switchProviderBusy": "Wait for the reply to finish before switching providers.",
   "agent.thinking": "Düşünüyor",
   "agent.title": "Ajan",
   "agent.toolsUsed": "{0} araç kullandı",

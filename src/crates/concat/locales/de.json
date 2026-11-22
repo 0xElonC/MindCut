@@ -51,6 +51,8 @@
   "agent.suggestCaptions": "Untertitel und einen Titel zur Zeitleiste hinzufügen",
   "agent.suggestHighlight": "Aus diesem Material ein 30-Sekunden-Highlight machen",
   "agent.suggestSilence": "Stille Stellen aus meinem Clip schneiden",
+  "agent.switchProvider": "Switch providers. If this chat has messages, switching starts a new chat.",
+  "agent.switchProviderBusy": "Wait for the reply to finish before switching providers.",
   "agent.thinking": "Denkt nach",
   "agent.title": "Agent",
   "agent.toolsUsed": "{0} Werkzeuge verwendet",

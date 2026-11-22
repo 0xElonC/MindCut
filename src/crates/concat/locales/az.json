@@ -51,6 +51,8 @@
   "agent.suggestCaptions": "Zaman xəttinə subtitr və başlıq əlavə et",
   "agent.suggestHighlight": "Bu görüntülərdən 30 saniyəlik seçmə hazırla",
   "agent.suggestSilence": "Klipimdən səssiz hissələri kəs",
+  "agent.switchProvider": "Switch providers. If this chat has messages, switching starts a new chat.",
+  "agent.switchProviderBusy": "Wait for the reply to finish before switching providers.",
   "agent.thinking": "Düşünür",
   "agent.title": "Agent",
   "agent.toolsUsed": "{0} alət istifadə etdi",

@@ -51,6 +51,8 @@
   "agent.suggestCaptions": "為時間軸加上字幕和標題",
   "agent.suggestHighlight": "用這些素材剪一段 30 秒精華",
   "agent.suggestSilence": "剪掉素材裡的靜音片段",
+  "agent.switchProvider": "Switch providers. If this chat has messages, switching starts a new chat.",
+  "agent.switchProviderBusy": "Wait for the reply to finish before switching providers.",
   "agent.thinking": "思考中",
   "agent.title": "智慧代理",
   "agent.toolsUsed": "使用了 {0} 個工具",

@@ -51,6 +51,8 @@
   "agent.suggestCaptions": "タイムラインに字幕とタイトルを追加して",
   "agent.suggestHighlight": "この素材から 30 秒のハイライトを作って",
   "agent.suggestSilence": "クリップから無音部分をカットして",
+  "agent.switchProvider": "Switch providers. If this chat has messages, switching starts a new chat.",
+  "agent.switchProviderBusy": "Wait for the reply to finish before switching providers.",
   "agent.thinking": "考え中",
   "agent.title": "エージェント",
   "agent.toolsUsed": "{0} 個のツールを使用",

@@ -51,6 +51,8 @@
   "agent.suggestCaptions": "Adicione legendas e um título à linha do tempo",
   "agent.suggestHighlight": "Faça um resumo de 30 segundos com estas filmagens",
   "agent.suggestSilence": "Corte os silêncios do meu clipe",
+  "agent.switchProvider": "Switch providers. If this chat has messages, switching starts a new chat.",
+  "agent.switchProviderBusy": "Wait for the reply to finish before switching providers.",
   "agent.thinking": "Pensando",
   "agent.title": "Agente",
   "agent.toolsUsed": "Usou {0} ferramentas",

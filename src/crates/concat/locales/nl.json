@@ -51,6 +51,8 @@
   "agent.suggestCaptions": "Voeg ondertitels en een titel toe aan de tijdlijn",
   "agent.suggestHighlight": "Maak een hoogtepunt van 30 seconden uit dit materiaal",
   "agent.suggestSilence": "Knip de stiltes uit mijn clip",
+  "agent.switchProvider": "Switch providers. If this chat has messages, switching starts a new chat.",
+  "agent.switchProviderBusy": "Wait for the reply to finish before switching providers.",
   "agent.thinking": "Denkt na",
   "agent.title": "Agent",
   "agent.toolsUsed": "{0} hulpmiddelen gebruikt",

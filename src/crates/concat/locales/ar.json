@@ -51,6 +51,8 @@
   "agent.suggestCaptions": "أضف ترجمات وعنوانًا إلى الخط الزمني",
   "agent.suggestHighlight": "اصنع مقطعًا مميزًا مدته 30 ثانية من هذه اللقطات",
   "agent.suggestSilence": "اقطع فترات الصمت من مقطعي",
+  "agent.switchProvider": "Switch providers. If this chat has messages, switching starts a new chat.",
+  "agent.switchProviderBusy": "Wait for the reply to finish before switching providers.",
   "agent.thinking": "يفكّر",
   "agent.title": "الوكيل",
   "agent.toolsUsed": "استخدم {0} أدوات",

@@ -51,6 +51,8 @@
   "agent.suggestCaptions": "Dodaj titlove i naslov na vremensku traku",
   "agent.suggestHighlight": "Napravi 30-sekundni sažetak ovih snimki",
   "agent.suggestSilence": "Izreži tišine iz mog klipa",
+  "agent.switchProvider": "Switch providers. If this chat has messages, switching starts a new chat.",
+  "agent.switchProviderBusy": "Wait for the reply to finish before switching providers.",
   "agent.thinking": "Razmišlja",
   "agent.title": "Agent",
   "agent.toolsUsed": "Upotrijebljeno alata: {0}",

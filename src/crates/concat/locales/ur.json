@@ -51,6 +51,8 @@
   "agent.suggestCaptions": "ٹائم لائن میں کیپشنز اور عنوان شامل کریں",
   "agent.suggestHighlight": "اس فوٹیج سے 30 سیکنڈ کی جھلکیاں بنائیں",
   "agent.suggestSilence": "میری کلپ سے خاموش حصے کاٹ دیں",
+  "agent.switchProvider": "Switch providers. If this chat has messages, switching starts a new chat.",
+  "agent.switchProviderBusy": "Wait for the reply to finish before switching providers.",
   "agent.thinking": "سوچ رہا ہے",
   "agent.title": "ایجنٹ",
   "agent.toolsUsed": "{0} ٹولز استعمال کیے",

@@ -51,6 +51,8 @@
   "agent.suggestCaptions": "เพิ่มคำบรรยายและชื่อเรื่องลงในไทม์ไลน์",
   "agent.suggestHighlight": "ทำไฮไลต์ 30 วินาทีจากฟุตเทจนี้",
   "agent.suggestSilence": "ตัดช่วงเงียบออกจากคลิปของฉัน",
+  "agent.switchProvider": "Switch providers. If this chat has messages, switching starts a new chat.",
+  "agent.switchProviderBusy": "Wait for the reply to finish before switching providers.",
   "agent.thinking": "กำลังคิด",
   "agent.title": "เอเจนต์",
   "agent.toolsUsed": "ใช้เครื่องมือ {0} รายการ",

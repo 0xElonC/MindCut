@@ -51,6 +51,8 @@
   "agent.suggestCaptions": "Añade subtítulos y un título a la línea de tiempo",
   "agent.suggestHighlight": "Haz un resumen de 30 segundos con este metraje",
   "agent.suggestSilence": "Quita los silencios de mi clip",
+  "agent.switchProvider": "Switch providers. If this chat has messages, switching starts a new chat.",
+  "agent.switchProviderBusy": "Wait for the reply to finish before switching providers.",
   "agent.thinking": "Pensando",
   "agent.title": "Agente",
   "agent.toolsUsed": "Usó {0} herramientas",

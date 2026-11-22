@@ -51,6 +51,8 @@
   "agent.suggestCaptions": "הוסף כתוביות וכותרת לציר הזמן",
   "agent.suggestHighlight": "הכן סיכום של 30 שניות מהחומר הזה",
   "agent.suggestSilence": "חתוך את קטעי השקט מהקליפ שלי",
+  "agent.switchProvider": "Switch providers. If this chat has messages, switching starts a new chat.",
+  "agent.switchProviderBusy": "Wait for the reply to finish before switching providers.",
   "agent.thinking": "חושב",
   "agent.title": "סוכן",
   "agent.toolsUsed": "השתמש ב-{0} כלים",

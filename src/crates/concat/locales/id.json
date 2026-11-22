@@ -51,6 +51,8 @@
   "agent.suggestCaptions": "Tambahkan teks dan judul ke lini masa",
   "agent.suggestHighlight": "Buat sorotan 30 detik dari rekaman ini",
   "agent.suggestSilence": "Potong bagian hening dari klipku",
+  "agent.switchProvider": "Switch providers. If this chat has messages, switching starts a new chat.",
+  "agent.switchProviderBusy": "Wait for the reply to finish before switching providers.",
   "agent.thinking": "Berpikir",
   "agent.title": "Agen",
   "agent.toolsUsed": "Memakai {0} alat",

@@ -51,6 +51,8 @@
   "agent.suggestCaptions": "زیرنویس و عنوان به خط زمانی اضافه کن",
   "agent.suggestHighlight": "از این فیلم‌ها یک خلاصهٔ ۳۰ ثانیه‌ای بساز",
   "agent.suggestSilence": "سکوت‌ها را از کلیپم حذف کن",
+  "agent.switchProvider": "Switch providers. If this chat has messages, switching starts a new chat.",
+  "agent.switchProviderBusy": "Wait for the reply to finish before switching providers.",
   "agent.thinking": "در حال فکر کردن",
   "agent.title": "عامل",
   "agent.toolsUsed": "{0} ابزار استفاده شد",

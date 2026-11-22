@@ -51,6 +51,8 @@
   "agent.suggestCaptions": "타임라인에 자막과 제목을 추가해 줘",
   "agent.suggestHighlight": "이 영상으로 30초 하이라이트를 만들어 줘",
   "agent.suggestSilence": "내 클립에서 무음 구간을 잘라 줘",
+  "agent.switchProvider": "Switch providers. If this chat has messages, switching starts a new chat.",
+  "agent.switchProviderBusy": "Wait for the reply to finish before switching providers.",
   "agent.thinking": "생각 중",
   "agent.title": "에이전트",
   "agent.toolsUsed": "도구 {0}개 사용",

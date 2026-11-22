@@ -51,6 +51,8 @@
   "agent.suggestCaptions": "Thêm phụ đề và tiêu đề vào dòng thời gian",
   "agent.suggestHighlight": "Dựng đoạn nổi bật 30 giây từ cảnh quay này",
   "agent.suggestSilence": "Cắt các đoạn im lặng khỏi clip của tôi",
+  "agent.switchProvider": "Switch providers. If this chat has messages, switching starts a new chat.",
+  "agent.switchProviderBusy": "Wait for the reply to finish before switching providers.",
   "agent.thinking": "Đang suy nghĩ",
   "agent.title": "Tác tử",
   "agent.toolsUsed": "Đã dùng {0} công cụ",
