@@ -20,6 +20,7 @@ import { I18n } from "../i18n.slint";
 import { Theme } from "../theme/theme.slint";
 import { Glyph, Icon } from "../icons.slint";
 import { IconButton } from "../primitives/panel.slint";
+import { FocusRing } from "../primitives/focus-ring.slint";
 import { Button } from "../primitives/modal.slint";
 import { Select } from "../primitives/select.slint";
 import { ThinScrollbar } from "../primitives/scrollbar.slint";
@@ -133,6 +134,10 @@ export global AgentChat {
     in property <[AgentProviderOption]> providers;
     in property <bool> can-switch-provider: true;
     callback provider-changed(id: string);
+
+    public pure function provider-name(id: string) -> string {
+        return id == "claude" ? "Claude" : "Codex";
+    }
 
     in property <[AgentMessage]> messages;
     in property <[AgentSession]> sessions;
@@ -1092,7 +1097,7 @@ component SessionRow inherits Rectangle {
                 }
             }
             Text {
-                text: root.data.detail;
+                text: AgentChat.provider-name(root.data.provider) + " · " + root.data.detail;
                 color: Theme.fg-dim;
                 font-size: Theme.fs-sm;
                 overflow: elide;
@@ -1295,6 +1300,163 @@ component LiveChip inherits Rectangle {
     }
 }
 
+component ProviderPicker inherits Rectangle {
+    in property <length> menu-width;
+    property <bool> enabled: AgentChat.can-switch-provider && AgentChat.providers.length > 0;
+    property <string> label: AgentChat.provider-name(AgentChat.provider);
+    property <int> highlighted: -1;
+
+    width: caption.preferred-width + 32px;
+    height: 28px;
+    border-radius: Theme.r;
+    opacity: root.enabled ? 1 : 0.45;
+    background: popup.is-open || (root.enabled && trigger.has-hover) ? Theme.field-hover : transparent;
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-description: hint.text;
+    accessible-enabled: root.enabled;
+    accessible-action-default => { root.reveal(); }
+
+    function reveal() {
+        if (root.enabled) {
+            root.highlighted = -1;
+            popup.show();
+        }
+    }
+
+    function choose(index: int) {
+        if (root.enabled && index >= 0 && index < AgentChat.providers.length
+            && AgentChat.providers[index].available) {
+            popup.close();
+            trigger-keys.focus();
+            AgentChat.provider-changed(AgentChat.providers[index].id);
+        }
+    }
+
+    changed enabled => {
+        if (!root.enabled && popup.is-open) { popup.close(); }
+    }
+
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 6px;
+        spacing: 6px;
+        caption := Text {
+            text: root.label;
+            color: Theme.fg-muted;
+            font-size: Theme.fs;
+            vertical-alignment: center;
+        }
+        VerticalLayout {
+            alignment: center;
+            Icon { glyph: Glyph.chevron-down; size: 12px; tint: Theme.fg-dim; }
+        }
+    }
+
+    trigger-keys := FocusScope {
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if (event.text == Key.DownArrow || event.text == Key.UpArrow
+                || event.text == "\n" || event.text == " ") {
+                root.reveal();
+                return accept;
+            }
+            return reject;
+        }
+    }
+    trigger := TouchArea {
+        mouse-cursor: root.enabled ? MouseCursor.pointer : MouseCursor.default;
+        clicked => { root.reveal(); }
+    }
+    hint := Tip {
+        text: AgentChat.can-switch-provider ? I18n.t("agent.switchProvider")
+            : I18n.t("agent.switchProviderBusy");
+        active: trigger.has-hover && !popup.is-open;
+    }
+    FocusRing { active: trigger-keys.has-focus || popup.is-open; }
+
+    popup := PopupWindow {
+        x: 0px;
+        y: -self.height - 8px;
+        width: root.menu-width;
+        height: menu.preferred-height;
+        close-policy: close-on-click-outside;
+        init => { menu-keys.focus(); }
+
+        Rectangle {
+            background: Theme.raised;
+            border-width: 1px;
+            border-color: Theme.line-strong;
+            border-radius: Theme.r;
+
+            menu-keys := FocusScope {
+                key-pressed(event) => {
+                    if (event.text == Key.DownArrow) {
+                        root.highlighted = Math.min(root.highlighted + 1, AgentChat.providers.length - 1);
+                    } else if (event.text == Key.UpArrow) {
+                        root.highlighted = root.highlighted < 0 ? AgentChat.providers.length - 1
+                            : Math.max(root.highlighted - 1, 0);
+                    } else if (event.text == "\n" || event.text == " ") {
+                        root.choose(root.highlighted);
+                    } else if (event.text == Key.Escape) {
+                        popup.close();
+                        trigger-keys.focus();
+                    } else {
+                        return reject;
+                    }
+                    return accept;
+                }
+            }
+
+            menu := VerticalLayout {
+                padding: 4px;
+                spacing: 2px;
+                for option[index] in AgentChat.providers: Rectangle {
+                    height: Math.max(28px, words.preferred-height + 10px);
+                    border-radius: Theme.r-sm;
+                    background: root.highlighted == index ? Theme.field-hover : transparent;
+                    accessible-role: button;
+                    accessible-label: option.label;
+                    accessible-description: option.reason;
+                    accessible-enabled: option.available;
+                    accessible-action-default => { root.choose(index); }
+
+                    HorizontalLayout {
+                        padding-left: 8px;
+                        padding-right: 8px;
+                        spacing: 8px;
+                        words := VerticalLayout {
+                            alignment: center;
+                            horizontal-stretch: 1;
+                            spacing: 2px;
+                            Text {
+                                text: option.label;
+                                color: option.available ? Theme.fg : Theme.fg-dim;
+                                font-size: Theme.fs;
+                            }
+                            if !option.available && option.reason != "": Text {
+                                text: option.reason;
+                                color: Theme.fg-muted;
+                                font-size: Theme.fs-sm;
+                                wrap: word-wrap;
+                            }
+                        }
+                        if option.id == AgentChat.provider: VerticalLayout {
+                            alignment: center;
+                            Icon { glyph: Glyph.check; size: 12px; tint: Theme.accent; }
+                        }
+                    }
+                    TouchArea {
+                        mouse-cursor: option.available ? MouseCursor.pointer : MouseCursor.default;
+                        changed has-hover => { if (self.has-hover) { root.highlighted = index; } }
+                        clicked => { root.choose(index); }
+                    }
+                }
+            }
+        }
+    }
+}
+
 // What is typed, what rides with it, and the two choices that shape the
 // answer: which model, and how hard it thinks.
 component Composer inherits Rectangle {
@@ -1406,6 +1568,9 @@ component Composer inherits Rectangle {
                 spacing: 4px;
                 height: 28px;
 
+                ProviderPicker {
+                    menu-width: Math.min(280px, parent.width);
+                }
                 IconButton {
                     glyph: Glyph.attach;
                     label: I18n.t("agent.attach");

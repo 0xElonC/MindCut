@@ -1306,14 +1306,20 @@ impl Controller {
             studio.prefs.agent_provider = Some(provider.as_str().into());
             studio.prefs.save(&studio.host.dirs);
         }
+        if self.switch_conversation_provider(provider) {
+            self.begin(shell, app);
+        }
+    }
+
+    fn switch_conversation_provider(&mut self, provider: Provider) -> bool {
         if self.provider == provider {
-            return;
+            return false;
         }
         if self.current.is_some() || self.lines.iter().any(|line| line.role == AgentRole::User) {
             self.new_chat();
         }
         self.change_provider(provider);
-        self.begin(shell, app);
+        true
     }
 
     fn new_chat(&mut self) {
@@ -1754,6 +1760,74 @@ mod tests {
             .recv_timeout(Duration::from_secs(2))
             .expect("callback")
             .expect("success")
+    }
+
+    #[test]
+    fn switching_provider_resets_only_a_conversation_with_messages() {
+        let mut controller = Controller::new(Store::in_memory(), None);
+        let empty_view = controller.view;
+        assert!(controller.switch_conversation_provider(Provider::Claude));
+        assert_eq!(controller.provider, Provider::Claude);
+        assert_eq!(controller.view, empty_view);
+
+        controller.remember_session("saved", "Saved chat".into(), "project".into());
+        controller.lines.push(Line::new("message", AgentRole::User));
+        assert!(!controller.switch_conversation_provider(Provider::Claude));
+        assert_eq!(controller.current.as_deref(), Some("saved"));
+        assert!(controller.switch_conversation_provider(Provider::Codex));
+        assert_eq!(controller.provider, Provider::Codex);
+        assert!(controller.current.is_none());
+        assert!(controller.lines.is_empty());
+        assert_ne!(controller.view, empty_view);
+        assert_eq!(controller.store.provider("saved"), Some(Provider::Claude));
+        assert_eq!(controller.store.list("")[0].id, "saved");
+    }
+
+    #[test]
+    fn each_provider_restores_its_own_model_and_effort() {
+        let mut controller = Controller::new(Store::in_memory(), None);
+        let models = |first: &str, second: &str, effort: &str| {
+            vec![
+                Model {
+                    id: first.into(),
+                    name: first.into(),
+                    efforts: vec!["low".into()],
+                    default_effort: "low".into(),
+                },
+                Model {
+                    id: second.into(),
+                    name: second.into(),
+                    efforts: vec!["medium".into(), effort.into()],
+                    default_effort: "medium".into(),
+                },
+            ]
+        };
+        let codex = models("codex-default", "codex-other", "high");
+        let claude = models("claude-default", "claude-other", "max");
+        controller.set_link(Link::Ready);
+        controller.models = codex.clone();
+        controller.model = 1;
+        controller.effort = 1;
+
+        assert!(controller.switch_conversation_provider(Provider::Claude));
+        controller.models = claude.clone();
+        controller.choose_defaults();
+        assert_eq!(controller.model_id().as_deref(), Some("claude-default"));
+        assert_eq!(controller.efforts(), ["low"]);
+        controller.model = 1;
+        controller.effort = 1;
+
+        assert!(controller.switch_conversation_provider(Provider::Codex));
+        controller.models = codex;
+        controller.choose_defaults();
+        assert_eq!(controller.model_id().as_deref(), Some("codex-other"));
+        assert_eq!(controller.effort_id().as_deref(), Some("high"));
+
+        assert!(controller.switch_conversation_provider(Provider::Claude));
+        controller.models = claude;
+        controller.choose_defaults();
+        assert_eq!(controller.model_id().as_deref(), Some("claude-other"));
+        assert_eq!(controller.effort_id().as_deref(), Some("max"));
     }
 
     #[test]
