@@ -105,6 +105,7 @@ export struct AgentSkill {
 /// One conversation in the list.
 export struct AgentSession {
     id: string,
+    provider: string,
     title: string,
     /// "Summer trip · 2 hours ago"
     detail: string,
@@ -115,11 +116,23 @@ export struct AgentSession {
     current: bool,
 }
 
+export struct AgentProviderOption {
+    id: string,
+    label: string,
+    available: bool,
+    reason: string,
+}
+
 /// What the pane shows and does, as one list for Rust to publish.
 export global AgentChat {
     in property <AgentStatus> status: AgentStatus.ready;
+    in property <string> status-title;
     /// The words under the status page's title: why, and what to do.
     in property <string> status-detail;
+    in property <string> provider: "codex";
+    in property <[AgentProviderOption]> providers;
+    in property <bool> can-switch-provider: true;
+    callback provider-changed(id: string);
 
     in property <[AgentMessage]> messages;
     in property <[AgentSession]> sessions;
@@ -953,7 +966,8 @@ component StatusPage inherits Rectangle {
             }
         }
         Text {
-            text: AgentChat.status == AgentStatus.connecting ? I18n.t("agent.connecting")
+            text: AgentChat.status-title != "" ? AgentChat.status-title
+                : AgentChat.status == AgentStatus.connecting ? I18n.t("agent.connecting")
                 : AgentChat.status == AgentStatus.missing ? I18n.t("agent.missingTitle")
                 : I18n.t("agent.failedTitle");
             color: Theme.fg;
