@@ -277,7 +277,7 @@ impl Api {
                 "models": status.models,
             },
             "speechGeneration": self.speech_status(),
-            "vocalSeparation": { "status": "notConnected" },
+            "vocalSeparation": self.vocal_status(),
             "videoEnhancement": { "status": "notConnected" },
         })
     }
@@ -414,7 +414,7 @@ impl Api {
                 self.book.abandon(&id);
                 ApiError::failed(format!("could not start the transcription: {error}"))
             })?;
-        self.jobs.transcripts.insert(id.clone());
+        self.jobs.standalone.insert(id.clone());
         self.jobs.threads.push((id, thread));
         Ok(started)
     }

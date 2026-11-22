@@ -84,10 +84,14 @@ impl Book {
                 status.duration = Some(*duration);
                 status.fraction = 1.0;
             }
-            Event::TranscriptDone { output, .. } => {
+            Event::TranscriptDone { output, .. } | Event::VocalsDone { output, .. } => {
                 status.state = JobState::Done;
                 status.output = output.clone();
                 status.fraction = 1.0;
+            }
+            Event::VocalsProgress { fraction, .. } => {
+                status.stage = Some("separating vocals".to_owned());
+                status.fraction = f64::from(*fraction).clamp(0.0, 1.0);
             }
             Event::CutoutProgress { fraction, .. } => {
                 status.stage = Some("cutout".to_owned());
@@ -130,7 +134,8 @@ impl Book {
             }
             Event::ExportFailed { error, .. }
             | Event::TranscriptFailed { error, .. }
-            | Event::SpeechFailed { error, .. } => {
+            | Event::SpeechFailed { error, .. }
+            | Event::VocalsFailed { error, .. } => {
                 status.state = if error.code == ErrorCode::Cancelled {
                     JobState::Cancelled
                 } else {

@@ -107,6 +107,18 @@ pub enum Request {
         #[serde(default)]
         model_id: Option<String>,
     },
+    /// Separates the whole source audio into cached singing and accompaniment.
+    #[serde(rename = "audio.separateVocals")]
+    AudioSeparateVocals {
+        /// The open project folder.
+        path: String,
+        /// A media item in the bin (default audio stream). Supply exactly one ID.
+        #[serde(default)]
+        media_id: Option<String>,
+        /// A clip whose chosen audio stream should be separated. Supply exactly one ID.
+        #[serde(default)]
+        clip_id: Option<String>,
+    },
     /// Reads a saved transcription, using seconds from the source file's start.
     #[serde(rename = "transcript.query")]
     TranscriptQuery {
@@ -322,6 +334,7 @@ impl Request {
             | Request::MediaImport { path, .. }
             | Request::MediaTranscribe { path, .. }
             | Request::SpeechGenerate { path, .. }
+            | Request::AudioSeparateVocals { path, .. }
             | Request::TranscriptQuery { path, .. }
             | Request::TemplateSave { path, .. }
             | Request::ExportRun { path, .. }
@@ -802,6 +815,36 @@ pub enum Event {
         /// Failure reason, without input text.
         error: ApiError,
     },
+    /// A vocal separation job reported progress.
+    #[serde(rename = "vocals.progress")]
+    VocalsProgress {
+        /// Job ID.
+        job: String,
+        /// Project folder.
+        path: String,
+        /// Fraction complete.
+        fraction: f32,
+    },
+    /// The two stems are ready in the project's cache.
+    #[serde(rename = "vocals.done")]
+    VocalsDone {
+        /// Job ID.
+        job: String,
+        /// Project folder.
+        path: String,
+        /// Cache folder containing voice.wav and rest.wav.
+        output: String,
+    },
+    /// A vocal separation job failed or was cancelled.
+    #[serde(rename = "vocals.failed")]
+    VocalsFailed {
+        /// Job ID.
+        job: String,
+        /// Project folder.
+        path: String,
+        /// Failure or cancellation reason.
+        error: ApiError,
+    },
     /// A transcript job reported its stage and progress.
     #[serde(rename = "transcript.progress")]
     TranscriptProgress {
@@ -919,6 +962,9 @@ impl Event {
             Event::SpeechProgress { job, .. }
             | Event::SpeechDone { job, .. }
             | Event::SpeechFailed { job, .. }
+            | Event::VocalsProgress { job, .. }
+            | Event::VocalsDone { job, .. }
+            | Event::VocalsFailed { job, .. }
             | Event::TranscriptProgress { job, .. }
             | Event::TranscriptDone { job, .. }
             | Event::TranscriptFailed { job, .. }

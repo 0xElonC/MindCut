@@ -60,6 +60,41 @@ pub struct Networks {
     pub accompaniment: PathBuf,
 }
 
+const MODELS: [concat_vision::models::ModelId; 2] = [
+    concat_vision::models::ModelId::SpleeterVocals,
+    concat_vision::models::ModelId::SpleeterAccompaniment,
+];
+
+/// The model directory used by the window's voice-isolation panel.
+pub fn models_dir(data: &Path) -> PathBuf {
+    concat_vision::models::models_dir(data)
+}
+
+/// Model IDs, byte sizes and local installation state, in stem order.
+pub fn model_status(data: &Path) -> [(&'static str, u64, bool); 2] {
+    MODELS.map(|id| {
+        (
+            id.name(),
+            id.spec().bytes,
+            concat_vision::models::installed(data, id),
+        )
+    })
+}
+
+impl Networks {
+    /// The local Spleeter pair, if both parts are installed. Never downloads.
+    pub fn installed(data: &Path) -> Option<Self> {
+        use concat_vision::models;
+        MODELS
+            .iter()
+            .all(|&id| models::installed(data, id))
+            .then(|| Self {
+                vocals: models::model_file(data, MODELS[0]),
+                accompaniment: models::model_file(data, MODELS[1]),
+            })
+    }
+}
+
 /// What one worker holds while a block runs, measured on a ten-minute
 /// stereo song.
 const WORKER_BYTES: u64 = 250 << 20;

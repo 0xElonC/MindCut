@@ -464,7 +464,7 @@ pub fn catalogue() -> Vec<Tool> {
         method(
             "ai_status",
             "Check local AI models",
-            "Read-only: installed Whisper models and speech models, sizes, and transcription, synthesis or download activity.",
+            "Reports installed Whisper models, TTS voices, Spleeter models, sizes and activity.",
             "ai.status",
             Raw,
         )
@@ -480,14 +480,21 @@ pub fn catalogue() -> Vec<Tool> {
         method(
             "speech_generate",
             "Generate speech locally",
-            "Reads `text` with `voiceId` at optional `speed` (0.5–2). Writes a WAV in the project audio folder and imports it into the bin only. Returns a `job`; `export_status` returns `mediaId` and `duration` after import. Cancel with `export_cancel`. If the model is missing, download it in Settings > Speech; this tool never downloads.",
+            "Generates local speech (speed 0.5–2) and imports a project WAV into the bin. Poll the job via `export_status` for `mediaId` and `duration`; cancel via `export_cancel`. Download missing models in Settings > Speech; the tool never downloads.",
             "speech.generate",
+            Raw,
+        ),
+        method(
+            "audio_separate_vocals",
+            "Separate singing from accompaniment",
+            "Splits a full audio stream locally. Poll `export_status` for the cache folder, then apply `setClipVoice` (kind `vocals`). Cancel via `export_cancel`. For `modelMissing`, select Voice Isolation > Song in the window inspector.",
+            "audio.separateVocals",
             Raw,
         ),
         method(
             "media_transcribe",
             "Transcribe project media locally",
-            "Transcribes `mediaId` (whole file, default audio) or `clipId` (its source range and track). Optional `language` (e.g. zh, or auto) and `modelId`. Returns a `job` and output path. Poll with `export_status`; cancel with `export_cancel`. On `modelMissing`, the error names the model and size; download it in Settings > Transcriber. The tool never downloads models. On success, replaces the saved transcript.",
+            "Transcribes media or a clip locally, replacing its saved transcript. Poll the job via `export_status`; cancel via `export_cancel`. Download missing models in Settings > Transcriber; the tool never downloads.",
             "media.transcribe",
             Raw,
         )
@@ -495,7 +502,7 @@ pub fn catalogue() -> Vec<Tool> {
         method(
             "transcript_query",
             "Query a saved transcript",
-            "Read-only. Gets text and timed words (characters for some scripts) for `mediaId` or `clipId`, from `transcripts/media-<id>.json` or `transcripts/clip-<id>.json` in the project. Use source seconds for `start`/`end`; `keyword` matches substrings of segment text, ignoring case. No model needed.",
+            "Reads saved text and timed words. Filter using source seconds and a case-insensitive segment substring. No model needed.",
             "transcript.query",
             Raw,
         )
@@ -503,14 +510,14 @@ pub fn catalogue() -> Vec<Tool> {
         method(
             "export_start",
             "Start an export",
-            "Starts rendering an open project's active timeline to `output` (an .mp4 path), as the window's Export does. Returns at once with a `job` id; follow it with `export_wait` or `export_status`. Optional: crf (quality, lower is better, 20 by default), preset (x264 speed, \"medium\"), width/height, rateNum/rateDen, codec (\"h264\", \"hevc\" or \"av1\"), tenBit, colorRange, hdr. One export runs at a time; another is refused as busy.",
+            "Renders the active timeline to an MP4. Poll the job with `export_wait` or `export_status`. One export runs at a time.",
             "export.run",
             Raw,
         ),
         method(
             "export_status",
             "Job status",
-            "How an export, transcription or speech job stands: `state` (\"running\", \"done\", \"cancelled\" or \"failed\"), `stage` and its `fraction` (0-1), then the output path or the error. Transcription stages are \"reading audio\", \"loading model\" and \"transcribing\". Exports also report frames and size; finished speech jobs report `mediaId` and `duration` in seconds.",
+            "Polls an export or AI job: state, stage, progress (0–1), output or error. Finished speech returns `mediaId` and `duration` in seconds; vocal separation returns a cache folder.",
             "export.status",
             Raw,
         )
@@ -527,7 +534,7 @@ pub fn catalogue() -> Vec<Tool> {
         method(
             "export_cancel",
             "Cancel a job",
-            "Requests that a running export, transcription or speech job stop; it then ends as \"cancelled\".",
+            "Requests cancellation of an export or AI job.",
             "export.cancel",
             Raw,
         )
@@ -1032,6 +1039,22 @@ mod tests {
     use crate::schema::check;
 
     #[test]
+    fn vocal_separation_lists_its_target_and_cache_workflow() {
+        let tools = Toolbox::new().list();
+        let tool = tools
+            .iter()
+            .find(|tool| tool["name"] == "audio_separate_vocals")
+            .expect("audio_separate_vocals is in tools/list");
+        let properties = &tool["inputSchema"]["properties"];
+        for name in ["path", "clipId", "mediaId"] {
+            assert!(properties.get(name).is_some(), "missing {name}");
+        }
+        assert_eq!(tool["annotations"]["readOnlyHint"], false);
+        let description = tool["description"].as_str().unwrap();
+        assert!(description.contains("export_status") && description.contains("setClipVoice"));
+    }
+
+    #[test]
     fn speech_tools_list_stock_voices_and_generation_with_correct_hints() {
         let tools = Toolbox::new().list();
         let voices = tools
@@ -1130,6 +1153,10 @@ mod tests {
                 json!({ "path": "/tmp/Cut", "text": "Hello", "voiceId": 2000, "speed": 1.2 }),
             ),
             ("ai_status", json!({})),
+            (
+                "audio_separate_vocals",
+                json!({ "path": "/tmp/Cut", "clipId": "clip-1" }),
+            ),
             (
                 "media_transcribe",
                 json!({ "path": "/tmp/Cut", "mediaId": "m1", "language": "zh" }),
