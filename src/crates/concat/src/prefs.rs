@@ -8,6 +8,7 @@
 
 use std::collections::BTreeMap;
 
+use concat_agent::backend::Provider;
 use concat_host::AppDirs;
 use serde::{Deserialize, Serialize};
 
@@ -75,6 +76,8 @@ pub struct Preferences {
     pub tts_model: Option<String>,
     /// The chosen voice id.
     pub tts_voice: Option<i32>,
+    /// The last agent provider chosen in the composer.
+    pub agent_provider: Option<String>,
     /// The interface's locale code ("de", "pt-BR", ...); absent is English.
     pub locale: Option<String>,
     /// Package ids starred in the effect libraries, in no order. One list
@@ -204,6 +207,14 @@ impl Default for VoiceoverPrefs {
 }
 
 impl Preferences {
+    /// The remembered agent provider, or Codex for older settings.
+    pub fn agent_provider(&self) -> Provider {
+        self.agent_provider
+            .as_deref()
+            .and_then(Provider::from_id)
+            .unwrap_or_default()
+    }
+
     /// Whether the timeline shows its VU meters; see `vu_meters`.
     pub fn meters_shown(&self) -> bool {
         self.vu_meters.unwrap_or(true)
@@ -440,6 +451,24 @@ fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_agent_provider_is_remembered_on_disk() {
+        let root =
+            std::env::temp_dir().join(format!("concat-agent-provider-{}", std::process::id()));
+        let dirs = AppDirs::under(&root);
+        assert_eq!(Preferences::load(&dirs).agent_provider(), Provider::Codex);
+        let prefs = Preferences {
+            agent_provider: Some("claude".into()),
+            ..Preferences::default()
+        };
+        prefs.save(&dirs);
+        assert_eq!(Preferences::load(&dirs).agent_provider(), Provider::Claude);
+        let unknown: Preferences =
+            serde_json::from_str(r#"{"agentProvider":"new-provider"}"#).expect("future setting");
+        assert_eq!(unknown.agent_provider(), Provider::Codex);
+        std::fs::remove_dir_all(root).expect("clean test preferences");
+    }
 
     /// A choice made is kept, whatever the platform's default: a phone
     /// that turned the magnet off stays off, and a desk that turned it on
