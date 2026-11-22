@@ -33,7 +33,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use concat_host::{AppDirs, SingleFlight};
+use concat_host::{AppDirs, Job, SingleFlight};
 use concat_media::{AudioDecoder, AudioOptions, SampleFormat};
 use serde::{Deserialize, Serialize};
 use whisper_rs::{
@@ -577,11 +577,15 @@ impl<'a> SpeechReel<'a> {
     /// Seconds into the reel as seconds into the sound. Past the end is
     /// the end of the last piece.
     fn to_source(&self, seconds: f64) -> f64 {
+        self.map_source(seconds, false)
+    }
+
+    fn map_source(&self, seconds: f64, start: bool) -> f64 {
         let rate = f64::from(SAMPLE_RATE);
         let at = (seconds.max(0.0) * rate).round() as usize;
         self.pieces
             .iter()
-            .find(|piece| at <= piece.at + piece.len)
+            .find(|piece| at < piece.at + piece.len || (!start && at == piece.at + piece.len))
             .or(self.pieces.last())
             .map_or(seconds, |piece| {
                 (piece.from + at.clamp(piece.at, piece.at + piece.len) - piece.at) as f64 / rate
@@ -591,6 +595,97 @@ impl<'a> SpeechReel<'a> {
     fn seconds(&self) -> f64 {
         self.samples.len() as f64 / f64::from(SAMPLE_RATE)
     }
+}
+
+// Keep token bytes together before reading UTF-8: Whisper can split a single
+// character across multiple tokens. Most scripts use spaces; for the scripts
+// below, return timed character units rather than a single sentence-sized word.
+fn word_ranges(text: &str) -> Vec<std::ops::Range<usize>> {
+    let mut words = Vec::new();
+    let mut start = None;
+    for (i, c) in text.char_indices() {
+        let separate = matches!(c, '\u{3040}'..='\u{30ff}' | '\u{3400}'..='\u{9fff}'
+            | '\u{20000}'..='\u{323af}' | '\u{0e00}'..='\u{0eff}' | '\u{1780}'..='\u{17ff}');
+        if c.is_whitespace() || separate {
+            if let Some(start) = start.take() {
+                words.push(start..i);
+            }
+            if separate {
+                words.push(i..i + c.len_utf8());
+            }
+        } else if start.is_none() {
+            start = Some(i);
+        }
+    }
+    if let Some(start) = start {
+        words.push(start..text.len());
+    }
+    words
+}
+
+fn timed_words(
+    segment: &WhisperSegment,
+    eot: whisper_rs::WhisperTokenId,
+    reel: &SpeechReel<'_>,
+    line: &Segment,
+) -> Vec<Word> {
+    let mut bytes = Vec::new();
+    let mut timings = Vec::new();
+    for token in (0..segment.n_tokens()).filter_map(|i| segment.get_token(i)) {
+        let data = token.token_data();
+        if data.id >= eot {
+            continue;
+        }
+        if let Ok(part) = token.to_bytes() {
+            let from = bytes.len();
+            bytes.extend_from_slice(part);
+            if from < bytes.len() && data.t0 >= 0 && data.t1 >= data.t0 {
+                timings.push((from..bytes.len(), data.t0, data.t1));
+            }
+        }
+    }
+    let Ok(raw) = std::str::from_utf8(&bytes) else {
+        return Vec::new();
+    };
+    align_words(raw, &timings, reel, line)
+}
+
+fn align_words(
+    raw: &str,
+    timings: &[(std::ops::Range<usize>, i64, i64)],
+    reel: &SpeechReel<'_>,
+    line: &Segment,
+) -> Vec<Word> {
+    let mut source = word_ranges(raw).into_iter().rev();
+    let mut words = Vec::new();
+    // The window's de-looping keeps the last repetition of a phrase. Walk
+    // backwards to align its surviving text with the original token times.
+    for wanted in word_ranges(&line.text).into_iter().rev() {
+        let text = &line.text[wanted];
+        let Some(range) = source.find(|range| &raw[range.clone()] == text) else {
+            break;
+        };
+        let i = timings.partition_point(|(span, _, _)| span.end <= range.start);
+        let mut overlapping = timings[i..]
+            .iter()
+            .take_while(|(span, _, _)| span.start < range.end);
+        if let Some((_, from, to)) = overlapping.next() {
+            let (from, end) = overlapping.fold((*from, *to), |(start, end), (_, a, b)| {
+                (start.min(*a), end.max(*b))
+            });
+            let from = reel
+                .map_source(from as f64 / 100.0, true)
+                .clamp(line.start, line.end);
+            let to = reel.to_source(end as f64 / 100.0).clamp(from, line.end);
+            words.push(Word {
+                start: from,
+                end: to,
+                text: text.to_owned(),
+            });
+        }
+    }
+    words.reverse();
+    words
 }
 
 /// The rate whisper hears at.
@@ -855,6 +950,66 @@ pub struct Segment {
     pub text: String,
 }
 
+/// A word and its time in seconds relative to the transcribed window.
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Word {
+    /// Seconds from the window's start.
+    pub start: f64,
+    /// Seconds from the window's start.
+    pub end: f64,
+    /// The word's text, including attached punctuation.
+    pub text: String,
+}
+
+/// A segment with Whisper's token times grouped into words.
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
+pub struct TimedSegment {
+    /// Seconds from the window's start.
+    pub start: f64,
+    /// Seconds from the window's start.
+    pub end: f64,
+    /// What was said.
+    pub text: String,
+    /// The timed words the model returned.
+    pub words: Vec<Word>,
+}
+
+/// A reserved transcription slot that can move to a worker.
+pub struct TimedRun {
+    transcriber: Arc<Transcriber>,
+    slot: Job,
+}
+
+impl TimedRun {
+    /// The stop flag for this run alone.
+    pub fn cancel_handle(&self) -> Arc<AtomicBool> {
+        self.slot.cancel_handle()
+    }
+
+    /// Transcribes with word timings, holding the same slot as window captions.
+    pub fn transcribe(
+        &self,
+        dirs: &AppDirs,
+        request: &TranscribeRequest,
+        progress: impl FnMut(JobStage) + Send + 'static,
+    ) -> Result<Vec<TimedSegment>, String> {
+        self.transcriber
+            .run_in_slot(dirs, request, Recipe::SHIPPED, &self.slot, true, progress)
+            .map(|lines| {
+                lines
+                    .into_iter()
+                    .map(|(line, words)| TimedSegment {
+                        start: line.start,
+                        end: line.end,
+                        text: line.text,
+                        words,
+                    })
+                    .collect()
+            })
+    }
+}
+
 /// What to transcribe.
 #[derive(Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -968,8 +1123,16 @@ impl Transcriber {
 
     /// Per-model state, for the settings panel.
     pub fn status(dirs: &AppDirs) -> Result<TranscriberStatus, String> {
-        let dir = models_dir(dirs)?;
-        Ok(TranscriberStatus {
+        Ok(Self::inspect_models(models_dir(dirs)?))
+    }
+
+    /// Inspects the same model directory without creating it.
+    pub fn status_read_only(dirs: &AppDirs) -> TranscriberStatus {
+        Self::inspect_models(dirs.data.join("whisper-models"))
+    }
+
+    fn inspect_models(dir: PathBuf) -> TranscriberStatus {
+        TranscriberStatus {
             models_dir: dir.to_string_lossy().into_owned(),
             models: KNOWN_MODELS
                 .iter()
@@ -982,7 +1145,7 @@ impl Transcriber {
                     downloaded: dir.join(format!("ggml-{}.bin", model.id)).is_file(),
                 })
                 .collect(),
-        })
+        }
     }
 
     /// Streams one model from Concat's mirror into the models folder. Blocks
@@ -1085,10 +1248,39 @@ impl Transcriber {
         dirs: &AppDirs,
         request: &TranscribeRequest,
         recipe: Recipe,
-        mut progress: impl FnMut(JobStage) + Send + 'static,
+        progress: impl FnMut(JobStage) + Send + 'static,
     ) -> Result<Vec<Segment>, String> {
-        let job = self.gate.begin("transcription")?;
+        let slot = self.gate.begin("transcription")?;
+        self.run_in_slot(dirs, request, recipe, &slot, false, progress)
+            .map(|lines| lines.into_iter().map(|(line, _)| line).collect())
+    }
+
+    /// Reserves the engine before a worker starts, so a caller can cancel immediately.
+    pub fn begin_timed(self: &Arc<Self>) -> Result<TimedRun, String> {
+        Ok(TimedRun {
+            transcriber: Arc::clone(self),
+            slot: self.gate.begin("transcription")?,
+        })
+    }
+
+    /// Whether Settings is currently downloading a model.
+    pub fn is_downloading(&self) -> bool {
+        self.downloads.is_busy()
+    }
+
+    fn run_in_slot(
+        &self,
+        dirs: &AppDirs,
+        request: &TranscribeRequest,
+        recipe: Recipe,
+        job: &Job,
+        timed: bool,
+        mut progress: impl FnMut(JobStage) + Send + 'static,
+    ) -> Result<Vec<(Segment, Vec<Word>)>, String> {
         let cancel = job.cancel_handle();
+        if job.cancelled() {
+            return Err("transcription cancelled".to_owned());
+        }
 
         let model_path = model_file(dirs, &request.model_id)?;
         if !model_path.is_file() {
@@ -1123,7 +1315,21 @@ impl Transcriber {
             },
         )
         .map_err(|error| error.to_string())?;
-        let samples = decoder.collect_f32().map_err(|error| error.to_string())?;
+        let samples = if timed {
+            let mut samples = Vec::new();
+            while !job.cancelled() {
+                let Some(block) = decoder.next_f32().map_err(|error| error.to_string())? else {
+                    break;
+                };
+                samples.extend(block);
+            }
+            if job.cancelled() {
+                return Err("transcription cancelled".to_owned());
+            }
+            samples
+        } else {
+            decoder.collect_f32().map_err(|error| error.to_string())?
+        };
         if samples.is_empty() {
             return Err("nothing to transcribe: the clip has no audio".to_owned());
         }
@@ -1222,6 +1428,9 @@ impl Transcriber {
         let mut params = FullParams::new(strategy);
         params.set_n_threads(threads as i32);
         params.set_language(Some(language));
+        if timed {
+            params.set_token_timestamps(true);
+        }
         params.set_print_special(false);
         params.set_print_progress(false);
         params.set_print_realtime(false);
@@ -1285,10 +1494,6 @@ impl Transcriber {
         let eot = context.token_eot();
         let lines = state.as_iter().filter_map(|segment| {
             if recipe.prune && made_up(&segment, eot) {
-                log::debug!(
-                    "transcribe: dropped as made up of silence: {:?}",
-                    segment.to_str_lossy().unwrap_or_default()
-                );
                 return None;
             }
             // Whisper's timestamps are centiseconds, in what it heard.
@@ -1299,11 +1504,17 @@ impl Transcriber {
             if recipe.prune {
                 text = unloop(&text);
             }
-            keep_segment(start, end, text)
+            let line = keep_segment(start, end, text)?;
+            let words = if timed {
+                timed_words(&segment, eot, &reel, &line)
+            } else {
+                Vec::new()
+            };
+            Some((line, words))
         });
-        let lines: Vec<Segment> = lines.collect();
+        let lines: Vec<_> = lines.collect();
         Ok(if recipe.prune {
-            drop_repeats(lines)
+            drop_repeats(lines, |(line, _)| line)
         } else {
             lines
         })
@@ -1493,7 +1704,6 @@ fn unloop(text: &str) -> String {
     }
     let unlooped = kept.join(" ");
     if kept.len() < words.len() {
-        log::debug!("transcribe: a loop taken out of {text:?}");
         unlooped
     } else {
         // Untouched, and with its own spacing.
@@ -1504,19 +1714,19 @@ fn unloop(text: &str) -> String {
 /// The lines without a loop that runs from one line to the next: the
 /// same words three lines running or more are kept once, the first time,
 /// at its own time. Twice in a row is left alone - "Yes." "Yes." is said.
-fn drop_repeats(lines: Vec<Segment>) -> Vec<Segment> {
+fn drop_repeats<T>(lines: Vec<T>, segment: impl Fn(&T) -> &Segment) -> Vec<T> {
     let plain = |text: &str| -> String {
         text.chars()
             .filter(|c| c.is_alphanumeric())
             .flat_map(char::to_lowercase)
             .collect()
     };
-    let mut out: Vec<Segment> = Vec::with_capacity(lines.len());
+    let mut out: Vec<T> = Vec::with_capacity(lines.len());
     let mut run = 0;
     for line in lines {
         let same = out
             .last()
-            .is_some_and(|last| plain(&last.text) == plain(&line.text));
+            .is_some_and(|last| plain(&segment(last).text) == plain(&segment(&line).text));
         run = if same { run + 1 } else { 1 };
         if run < 3 {
             out.push(line);
@@ -1858,22 +2068,59 @@ mod tests {
     }
 
     #[test]
+    fn words_group_split_utf8_tokens_and_restore_source_time_after_a_cut() {
+        let samples = vec![0.0; SAMPLE_RATE as usize * 15];
+        let reel = SpeechReel::cut(&samples, &[(1.5, 2.5), (8.5, 10.5)]);
+        // The first piece is source 0..3, the second starts at source 7.
+        // The boundary at second 3 belongs to the second piece for starts.
+        let line = Segment {
+            start: 0.0,
+            end: 12.0,
+            text: "Hi café".to_owned(),
+        };
+        let words = align_words(
+            " Hi café",
+            &[(0..3, 20, 50), (3..8, 300, 320), (8..9, 320, 350)],
+            &reel,
+            &line,
+        );
+        assert_eq!(
+            words,
+            vec![
+                Word {
+                    text: "Hi".to_owned(),
+                    start: 0.2,
+                    end: 0.5
+                },
+                Word {
+                    text: "café".to_owned(),
+                    start: 7.0,
+                    end: 7.5
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn a_line_repeated_three_times_running_is_kept_once() {
         let line = |start: f64, text: &str| Segment {
             start,
             end: start + 1.0,
             text: text.to_owned(),
         };
-        let kept = drop_repeats(vec![
-            line(0.0, "Yes."),
-            line(1.0, "yes"),
-            line(2.0, "Go on."),
-            line(3.0, "Thanks for watching!"),
-            line(4.0, "Thanks for watching!"),
-            line(5.0, "Thanks for watching!"),
-            line(6.0, "Thanks for watching."),
-            line(7.0, "Bye."),
-        ]);
+        let kept = drop_repeats(
+            vec![
+                line(0.0, "Yes."),
+                line(1.0, "yes"),
+                line(2.0, "Go on."),
+                line(3.0, "Thanks for watching!"),
+                line(4.0, "Thanks for watching!"),
+                line(5.0, "Thanks for watching!"),
+                line(6.0, "Thanks for watching."),
+                line(7.0, "Bye."),
+            ],
+            |line| line,
+        );
         let text: Vec<&str> = kept.iter().map(|line| line.text.as_str()).collect();
         assert_eq!(
             text,

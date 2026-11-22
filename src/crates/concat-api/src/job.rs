@@ -63,6 +63,17 @@ impl Book {
             return;
         };
         match event {
+            Event::TranscriptProgress {
+                stage, fraction, ..
+            } => {
+                status.stage = Some(stage.clone());
+                status.fraction = f64::from(*fraction).clamp(0.0, 1.0);
+            }
+            Event::TranscriptDone { output, .. } => {
+                status.state = JobState::Done;
+                status.output = output.clone();
+                status.fraction = 1.0;
+            }
             Event::CutoutProgress { fraction, .. } => {
                 status.stage = Some("cutout".to_owned());
                 status.fraction = f64::from(*fraction).clamp(0.0, 1.0);
@@ -102,7 +113,7 @@ impl Book {
                 status.frame = status.total;
                 status.fraction = 1.0;
             }
-            Event::ExportFailed { error, .. } => {
+            Event::ExportFailed { error, .. } | Event::TranscriptFailed { error, .. } => {
                 status.state = if error.code == ErrorCode::Cancelled {
                     JobState::Cancelled
                 } else {
@@ -146,6 +157,17 @@ impl Book {
                 .find(|status| status.job == job)
                 .cloned()
         })
+    }
+
+    /// Raises only this job's stop flag.
+    pub(crate) fn cancel(&self, job: &str) -> bool {
+        let inner = self.inner();
+        if let Some(flag) = inner.running.get(job) {
+            flag.store(true, Ordering::Relaxed);
+            true
+        } else {
+            false
+        }
     }
 
     /// Raises every running job's stop flag. How many there were.

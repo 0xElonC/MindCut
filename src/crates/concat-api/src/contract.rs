@@ -80,11 +80,19 @@ fn reply_schema(method: &str, generator: &mut SchemaGenerator) -> Option<Value> 
             "type": "object",
             "description": "The `concat.json` a save would write, as it stands."
         }),
+        "ai.status" => json!({
+            "type": "object",
+            "description": "Local AI status. Transcription includes model ids, sizes, installation and whether the engine is busy; other entries report notConnected."
+        }),
+        "transcript.query" => json!({
+            "type": "object",
+            "description": "Saved transcription metadata and segment text with words. Segment and word times are source seconds."
+        }),
         "media.probe" => of::<MediaSummary>(generator),
         "catalogue.list" => of::<Vec<PackageInfo>>(generator),
         "template.list" => of::<Vec<TemplateInfo>>(generator),
         "template.save" => of::<TemplateInfo>(generator),
-        "export.run" => of::<Started>(generator),
+        "export.run" | "media.transcribe" => of::<Started>(generator),
         "export.status" => of::<JobStatus>(generator),
         "preview.frame" => json!({
             "description": "The file written when the request names an `output`; the picture itself when it does not.",

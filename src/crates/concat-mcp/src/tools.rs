@@ -462,6 +462,30 @@ pub fn catalogue() -> Vec<Tool> {
             Summary,
         ),
         method(
+            "ai_status",
+            "Check local AI models",
+            "Read-only: installed Whisper models, sizes, and transcription/download activity. Other AI features report not connected.",
+            "ai.status",
+            Raw,
+        )
+        .reading(),
+        method(
+            "media_transcribe",
+            "Transcribe project media locally",
+            "Transcribes `mediaId` (whole file, default audio) or `clipId` (its source range and track). Optional `language` (e.g. zh, or auto) and `modelId`. Returns a `job` and output path. Poll with `export_status`; cancel with `export_cancel`. On `modelMissing`, the error names the model and size; download it in Settings > Transcriber. The tool never downloads models. On success, replaces the saved transcript.",
+            "media.transcribe",
+            Raw,
+        )
+        .destroying(),
+        method(
+            "transcript_query",
+            "Query a saved transcript",
+            "Read-only. Gets text and timed words (characters for some scripts) for `mediaId` or `clipId`, from `transcripts/media-<id>.json` or `transcripts/clip-<id>.json` in the project. Use source seconds for `start`/`end`; `keyword` matches substrings of segment text, ignoring case. No model needed.",
+            "transcript.query",
+            Raw,
+        )
+        .reading(),
+        method(
             "export_start",
             "Start an export",
             "Starts rendering an open project's active timeline to `output` (an .mp4 path), as the window's Export does. Returns at once with a `job` id; follow it with `export_wait` or `export_status`. Optional: crf (quality, lower is better, 20 by default), preset (x264 speed, \"medium\"), width/height, rateNum/rateDen, codec (\"h264\", \"hevc\" or \"av1\"), tenBit, colorRange, hdr. One export runs at a time; another is refused as busy.",
@@ -470,8 +494,8 @@ pub fn catalogue() -> Vec<Tool> {
         ),
         method(
             "export_status",
-            "Export status",
-            "How an export job stands, at once: `state` (\"running\", \"done\", \"cancelled\" or \"failed\"), `stage` (\"cutout\", \"stabilize\", \"rendering\", \"mixing audio\" or \"muxing\"), frames done of total, `fraction` of the stage (0-1), and once done the file and its size, or the error.",
+            "Job status",
+            "How an export or transcription job stands, at once: `state` (\"running\", \"done\", \"cancelled\" or \"failed\"), `stage` and its `fraction` (0-1), then the output path or the error. Transcription stages are \"reading audio\", \"loading model\" and \"transcribing\". Exports also report rendered frames and picture size.",
             "export.status",
             Raw,
         )
@@ -487,8 +511,8 @@ pub fn catalogue() -> Vec<Tool> {
         },
         method(
             "export_cancel",
-            "Cancel an export",
-            "Stops a running export job at its next frame; it then ends as \"cancelled\".",
+            "Cancel a job",
+            "Requests that a running export or transcription job stop; it then ends as \"cancelled\".",
             "export.cancel",
             Raw,
         )
@@ -993,6 +1017,52 @@ mod tests {
     use super::*;
     use crate::schema::check;
 
+    #[test]
+    fn transcription_tools_list_their_inputs_outputs_and_read_only_flags() {
+        let list = Toolbox::new().list();
+        let tool = |name| {
+            list.iter()
+                .find(|tool| tool["name"] == name)
+                .expect("tool in list")
+        };
+        let status = tool("ai_status");
+        let start = tool("media_transcribe");
+        let query = tool("transcript_query");
+        assert_eq!(status["annotations"]["readOnlyHint"], true);
+        assert_eq!(start["annotations"]["readOnlyHint"], false);
+        assert_eq!(query["annotations"]["readOnlyHint"], true);
+        assert!(
+            status["description"]
+                .as_str()
+                .expect("status description")
+                .contains("installed Whisper models")
+        );
+        let description = start["description"].as_str().expect("start description");
+        assert!(
+            description.contains("job")
+                && description.contains("Settings > Transcriber")
+                && description.contains("never downloads")
+        );
+        assert!(
+            query["description"]
+                .as_str()
+                .expect("query description")
+                .contains("timed words")
+        );
+        for prop in ["path", "mediaId", "clipId", "language", "modelId"] {
+            assert!(
+                start["inputSchema"]["properties"].get(prop).is_some(),
+                "missing {prop}"
+            );
+        }
+        for prop in ["path", "mediaId", "clipId", "start", "end", "keyword"] {
+            assert!(
+                query["inputSchema"]["properties"].get(prop).is_some(),
+                "missing {prop}"
+            );
+        }
+    }
+
     /// One call each tool may take, as an agent would write it.
     fn samples() -> Vec<(&'static str, Value)> {
         vec![
@@ -1013,6 +1083,15 @@ mod tests {
                 json!({ "path": "/tmp/Cut", "video": { "width": 1920, "height": 1080, "rateNum": 30000, "rateDen": 1001 } }),
             ),
             ("media_probe", json!({ "path": "/tmp/a.mp4" })),
+            ("ai_status", json!({})),
+            (
+                "media_transcribe",
+                json!({ "path": "/tmp/Cut", "mediaId": "m1", "language": "zh" }),
+            ),
+            (
+                "transcript_query",
+                json!({ "path": "/tmp/Cut", "clipId": "c1", "start": 2.5, "keyword": "hello" }),
+            ),
             (
                 "media_import",
                 json!({ "path": "/tmp/Cut", "file": "/tmp/a.mp4" }),

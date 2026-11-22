@@ -69,6 +69,49 @@ pub enum Request {
         #[serde(default)]
         video: Option<VideoSettings>,
     },
+    /// Whether the on-device AI engines are installed and busy.
+    #[serde(rename = "ai.status")]
+    AiStatus,
+    /// Starts an on-device transcription of a project source.
+    #[serde(rename = "media.transcribe")]
+    MediaTranscribe {
+        /// The open project folder.
+        path: String,
+        /// A media item in the bin (the whole file's default audio stream).
+        /// Supply exactly one of mediaId and clipId.
+        #[serde(default)]
+        media_id: Option<String>,
+        /// A clip id (its selected audio stream and source-time range).
+        #[serde(default)]
+        clip_id: Option<String>,
+        /// Whisper language code, e.g. en or zh; omit for auto detection.
+        #[serde(default)]
+        language: Option<String>,
+        /// An installed Whisper model id; omit to select a compatible model.
+        #[serde(default)]
+        model_id: Option<String>,
+    },
+    /// Reads a saved transcription, using seconds from the source file's start.
+    #[serde(rename = "transcript.query")]
+    TranscriptQuery {
+        /// The open project folder.
+        path: String,
+        /// Media id used at transcription, if clipId is absent.
+        #[serde(default)]
+        media_id: Option<String>,
+        /// Clip id used at transcription, if mediaId is absent.
+        #[serde(default)]
+        clip_id: Option<String>,
+        /// Include words overlapping this start in source seconds.
+        #[serde(default)]
+        start: Option<f64>,
+        /// Include words overlapping this end in source seconds.
+        #[serde(default)]
+        end: Option<f64>,
+        /// Case-insensitive substring in the source transcript.
+        #[serde(default)]
+        keyword: Option<String>,
+    },
     /// Opens a project folder. Opening one already open returns its state
     /// as it stands, edits and all.
     #[serde(rename = "project.open")]
@@ -261,6 +304,8 @@ impl Request {
             | Request::EditUndo { path }
             | Request::EditRedo { path }
             | Request::MediaImport { path, .. }
+            | Request::MediaTranscribe { path, .. }
+            | Request::TranscriptQuery { path, .. }
             | Request::TemplateSave { path, .. }
             | Request::ExportRun { path, .. }
             | Request::PreviewFrame { path, .. } => Some(path),
@@ -343,6 +388,10 @@ pub enum Reply {
     Document(Value),
     /// [`Request::MediaProbe`].
     Media(MediaSummary),
+    /// Status of the on-device AI engines.
+    AiStatus(Value),
+    /// A saved transcript and matching word times.
+    Transcript(Value),
     /// [`Request::CatalogueList`].
     Packages(Vec<PackageInfo>),
     /// [`Request::TemplateList`].
@@ -593,6 +642,8 @@ pub enum ErrorCode {
     /// The transport wanted a token and did not get the right one. Never
     /// raised by the API itself.
     Unauthorized,
+    /// A requested model is not installed.
+    ModelMissing,
     /// Everything else: a file that could not be read or written, a decode
     /// that failed, a model that did not download.
     Failed,
@@ -612,6 +663,7 @@ impl ErrorCode {
             ErrorCode::Busy => -32004,
             ErrorCode::Cancelled => -32005,
             ErrorCode::Unauthorized => -32006,
+            ErrorCode::ModelMissing => -32007,
         }
     }
 }
@@ -684,6 +736,38 @@ impl From<Result<Reply, ApiError>> for Response {
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all_fields = "camelCase")]
 pub enum Event {
+    /// A transcript job reported its stage and progress.
+    #[serde(rename = "transcript.progress")]
+    TranscriptProgress {
+        /// The job id.
+        job: String,
+        /// The project folder.
+        path: String,
+        /// The current stage.
+        stage: String,
+        /// How much of this stage is done.
+        fraction: f32,
+    },
+    /// A transcript job saved its result.
+    #[serde(rename = "transcript.done")]
+    TranscriptDone {
+        /// The job id.
+        job: String,
+        /// The project folder.
+        path: String,
+        /// The transcript path; the event does not contain transcript text.
+        output: String,
+    },
+    /// A transcript job failed or was cancelled.
+    #[serde(rename = "transcript.failed")]
+    TranscriptFailed {
+        /// The job id.
+        job: String,
+        /// The project folder.
+        path: String,
+        /// The failure reason; no transcript text.
+        error: ApiError,
+    },
     /// A cutout's masks are being found ahead of an export.
     #[serde(rename = "cutout.progress")]
     CutoutProgress {
@@ -766,7 +850,10 @@ impl Event {
     /// The job this event is about.
     pub fn job(&self) -> &str {
         match self {
-            Event::CutoutProgress { job, .. }
+            Event::TranscriptProgress { job, .. }
+            | Event::TranscriptDone { job, .. }
+            | Event::TranscriptFailed { job, .. }
+            | Event::CutoutProgress { job, .. }
             | Event::StabilizeProgress { job, .. }
             | Event::ExportProgress { job, .. }
             | Event::ExportDone { job, .. }

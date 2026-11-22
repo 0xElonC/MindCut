@@ -35,6 +35,7 @@ pub mod message;
 #[cfg(test)]
 mod project_close_tests;
 pub mod rpc;
+mod transcription;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -272,6 +273,7 @@ pub struct Api {
     stabilizers: Arc<Stabilizers>,
     monitor: Monitor,
     exporter: Exporter,
+    transcriber: Arc<concat_speech::Transcriber>,
     events: EventSink,
     jobs: Jobs,
     /// Every job's last known state and each running one's stop flag, fed
@@ -333,6 +335,7 @@ impl Api {
             stabilizers: Arc::new(Stabilizers::new()),
             monitor: Monitor::new(),
             exporter: Exporter::new(),
+            transcriber: Arc::new(concat_speech::Transcriber::new()),
             sessions: BTreeMap::new(),
             roots: Vec::new(),
             open: OpenProjects::default(),
@@ -408,6 +411,11 @@ impl Api {
     /// at a time" holds across a window and this API together.
     pub fn share_exporter(&mut self, exporter: Exporter) {
         self.exporter = exporter;
+    }
+
+    /// Shares the active window's transcription engine and job slot.
+    pub fn share_transcriber(&mut self, transcriber: Arc<concat_speech::Transcriber>) {
+        self.transcriber = transcriber;
     }
 
     /// Takes an embedder's register of open projects in place of its own,
@@ -519,6 +527,39 @@ impl Api {
         }
         match request {
             Request::Version => Ok(Reply::Version(self.version())),
+            Request::AiStatus => Ok(Reply::AiStatus(self.ai_status())),
+            Request::MediaTranscribe {
+                path,
+                media_id,
+                clip_id,
+                language,
+                model_id,
+            } => {
+                let target = transcription::Target::new(media_id, clip_id)?;
+                Ok(Reply::Started(self.transcribe(
+                    &path,
+                    target,
+                    language,
+                    model_id.as_deref(),
+                )?))
+            }
+            Request::TranscriptQuery {
+                path,
+                media_id,
+                clip_id,
+                start,
+                end,
+                keyword,
+            } => {
+                let target = transcription::Target::new(media_id, clip_id)?;
+                Ok(Reply::Transcript(self.query_transcript(
+                    &path,
+                    &target,
+                    start,
+                    end,
+                    keyword.as_deref(),
+                )?))
+            }
             Request::ProjectCreate {
                 location,
                 name,
@@ -873,11 +914,18 @@ impl Api {
                 format!("no job {job} is running"),
             ));
         }
-        // Whichever phase it is in: the analysis ahead of the render, or
-        // the render itself.
-        self.cutouts.cancel();
-        self.stabilizers.cancel();
-        self.exporter.cancel();
+        let is_transcript = self.jobs.transcripts.contains(job);
+        if !self.book.cancel(job) {
+            return Err(ApiError::new(
+                ErrorCode::NotFound,
+                format!("no job {job} is running"),
+            ));
+        }
+        if !is_transcript {
+            // Export workers also run these analysers before rendering.
+            self.cutouts.cancel();
+            self.stabilizers.cancel();
+        }
         Ok(())
     }
 
@@ -979,6 +1027,7 @@ impl Api {
 struct Jobs {
     minted: u64,
     threads: Vec<(String, JoinHandle<()>)>,
+    transcripts: std::collections::BTreeSet<String>,
 }
 
 impl Jobs {
@@ -995,6 +1044,7 @@ impl Jobs {
             let ended = thread.is_finished();
             if ended {
                 book.abandon(name);
+                self.transcripts.remove(name);
             }
             !ended
         });
@@ -1005,6 +1055,7 @@ impl Jobs {
         for (_, thread) in self.threads.drain(..) {
             let _ = thread.join();
         }
+        self.transcripts.clear();
     }
 }
 
