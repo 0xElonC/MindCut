@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 /// The environment variable that names the program outright, for a person
 /// whose Codex lives somewhere unusual.
 pub const OVERRIDE: &str = "CONCAT_CODEX";
+pub const CLAUDE_OVERRIDE: &str = "CONCAT_CLAUDE";
 
 /// The names the program goes by: on Windows an npm install leaves a
 /// `codex.cmd` shim rather than an executable, and Codex's own build is an
@@ -54,6 +55,73 @@ pub fn codex() -> Option<PathBuf> {
         &extra,
         |candidate| candidate.is_file(),
     )
+}
+
+pub fn claude() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
+    let appdata = std::env::var_os("APPDATA").map(PathBuf::from);
+    let local = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
+    let npm = std::env::var_os("NPM_CONFIG_PREFIX").map(PathBuf::from);
+    let extra = [
+        appdata.map(|path| path.join("npm")),
+        local.map(|path| path.join("Programs").join("claude")),
+        npm.map(|path| {
+            if cfg!(windows) {
+                path
+            } else {
+                path.join("bin")
+            }
+        }),
+    ];
+    claude_in(
+        std::env::var_os(CLAUDE_OVERRIDE).map(PathBuf::from),
+        std::env::var_os("PATH").as_deref(),
+        home.as_deref().map(Path::new),
+        &extra.into_iter().flatten().collect::<Vec<_>>(),
+        executable,
+    )
+}
+
+fn executable(path: &Path) -> bool {
+    let Ok(meta) = path.metadata() else {
+        return false;
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        meta.is_file() && meta.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    meta.is_file()
+}
+
+fn claude_in(
+    forced: Option<PathBuf>,
+    path: Option<&std::ffi::OsStr>,
+    home: Option<&Path>,
+    extra: &[PathBuf],
+    exists: impl Fn(&Path) -> bool,
+) -> Option<PathBuf> {
+    if let Some(forced) = forced.filter(|forced| !forced.as_os_str().is_empty()) {
+        return exists(&forced).then_some(forced);
+    }
+    let names: &[&str] = if cfg!(windows) {
+        &["claude.exe", "claude.cmd"]
+    } else {
+        &["claude"]
+    };
+    let directories = path
+        .into_iter()
+        .flat_map(std::env::split_paths)
+        .filter(|dir| dir.is_absolute())
+        .chain(extra.iter().cloned())
+        .chain(home.into_iter().flat_map(|home| {
+            [".local/bin", ".npm-global/bin", ".volta/bin", ".bun/bin"].map(|dir| home.join(dir))
+        }))
+        .chain(["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"].map(PathBuf::from));
+    directories
+        .flat_map(|dir| names.iter().map(move |name| dir.join(name)))
+        .find(|candidate| exists(candidate))
 }
 
 /// [`codex`] over what it reads from the machine, so a test can give it
@@ -104,6 +172,31 @@ pub fn find(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn claude_uses_its_own_paths() {
+        let name = if cfg!(windows) {
+            "claude.exe"
+        } else {
+            "claude"
+        };
+        let home = Path::new("/person");
+        for location in [
+            home.join(".local/bin"),
+            home.join(".npm-global/bin"),
+            PathBuf::from("/opt/homebrew/bin"),
+        ] {
+            let expected = location.join(name);
+            assert_eq!(
+                claude_in(None, None, Some(home), &[], |path| path == expected),
+                Some(expected)
+            );
+        }
+        assert_eq!(
+            claude_in(None, None, Some(home), &[], |path| path.ends_with("codex")),
+            None
+        );
+    }
 
     const UNIX: &[&str] = &["codex"];
     const WINDOWS: &[&str] = &["codex.exe", "codex.cmd"];

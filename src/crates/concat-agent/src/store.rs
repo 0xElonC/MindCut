@@ -12,10 +12,12 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
+use crate::backend::Provider;
+
 /// One conversation in the list.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Chat {
-    /// Codex's id for the thread.
+    /// The backend's id for the thread.
     pub id: String,
     pub title: String,
     /// The project folder it was about.
@@ -25,11 +27,17 @@ pub struct Chat {
     pub messages: u32,
 }
 
+#[derive(Debug)]
+struct Record {
+    chat: Chat,
+    provider: Provider,
+}
+
 /// The list, newest first, and the file it is kept in.
 #[derive(Debug, Default)]
 pub struct Store {
     file: Option<PathBuf>,
-    chats: Vec<Chat>,
+    chats: Vec<Record>,
 }
 
 impl Store {
@@ -52,20 +60,25 @@ impl Store {
         Store::default()
     }
 
-    fn read(value: &Value) -> Vec<Chat> {
+    fn read(value: &Value) -> Vec<Record> {
         value
             .get("chats")
             .and_then(Value::as_array)
             .into_iter()
             .flatten()
             .filter_map(|chat| {
-                Some(Chat {
+                let provider = match chat.get("provider") {
+                    None => Provider::Codex,
+                    Some(value) => Provider::from_id(value.as_str()?)?,
+                };
+                let chat = Chat {
                     id: chat.get("id")?.as_str()?.to_owned(),
                     title: chat.get("title")?.as_str()?.to_owned(),
                     project: chat.get("project")?.as_str()?.to_owned(),
                     updated: chat.get("updated")?.as_u64()?,
                     messages: chat.get("messages")?.as_u64()? as u32,
-                })
+                };
+                Some(Record { chat, provider })
             })
             .collect()
     }
@@ -75,10 +88,11 @@ impl Store {
         let chats: Vec<Value> = self
             .chats
             .iter()
-            .map(|chat| {
+            .map(|Record { chat, provider }| {
                 json!({
                     "id": chat.id, "title": chat.title, "project": chat.project,
                     "updated": chat.updated, "messages": chat.messages,
+                    "provider": provider.as_str(),
                 })
             })
             .collect();
@@ -102,6 +116,7 @@ impl Store {
         let mut chats: Vec<&Chat> = self
             .chats
             .iter()
+            .map(|record| &record.chat)
             .filter(|chat| query.is_empty() || chat.title.to_lowercase().contains(&query))
             .collect();
         chats.sort_by(|a, b| b.updated.cmp(&a.updated));
@@ -109,29 +124,49 @@ impl Store {
     }
 
     pub fn get(&self, id: &str) -> Option<&Chat> {
-        self.chats.iter().find(|chat| chat.id == id)
+        self.chats
+            .iter()
+            .find(|record| record.chat.id == id)
+            .map(|record| &record.chat)
+    }
+
+    pub fn provider(&self, id: &str) -> Option<Provider> {
+        self.chats
+            .iter()
+            .find(|record| record.chat.id == id)
+            .map(|record| record.provider)
     }
 
     /// Adds a chat, or replaces the one with its id.
     pub fn put(&mut self, chat: Chat) {
-        match self.chats.iter_mut().find(|known| known.id == chat.id) {
-            Some(known) => *known = chat,
-            None => self.chats.push(chat),
+        let provider = self.provider(&chat.id).unwrap_or_default();
+        self.put_with_provider(chat, provider);
+    }
+
+    pub fn put_with_provider(&mut self, chat: Chat, provider: Provider) {
+        let existing = self
+            .chats
+            .iter_mut()
+            .find(|record| record.chat.id == chat.id);
+        let record = Record { chat, provider };
+        match existing {
+            Some(existing) => *existing = record,
+            None => self.chats.push(record),
         }
         self.save();
     }
 
     /// Changes one chat in place, if it is there.
     pub fn edit(&mut self, id: &str, change: impl FnOnce(&mut Chat)) {
-        if let Some(chat) = self.chats.iter_mut().find(|chat| chat.id == id) {
-            change(chat);
+        if let Some(record) = self.chats.iter_mut().find(|record| record.chat.id == id) {
+            change(&mut record.chat);
             self.save();
         }
     }
 
     /// Forgets a chat.
     pub fn remove(&mut self, id: &str) {
-        self.chats.retain(|chat| chat.id != id);
+        self.chats.retain(|record| record.chat.id != id);
         self.save();
     }
 }
@@ -162,20 +197,34 @@ mod tests {
         store.put(chat("a", "Two", 2));
         assert_eq!(store.list("").len(), 1);
         store.edit("a", |chat| chat.title = "Three".into());
-        assert_eq!(store.get("a").map(|chat| chat.title.as_str()), Some("Three"));
+        assert_eq!(
+            store.get("a").map(|chat| chat.title.as_str()),
+            Some("Three")
+        );
         store.remove("a");
         assert!(store.get("a").is_none());
     }
 
     #[test]
     fn the_list_survives_a_restart() {
-        let folder = std::env::temp_dir().join(format!("concat-agent-store-{}", std::process::id()));
+        let folder =
+            std::env::temp_dir().join(format!("concat-agent-store-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&folder);
         let file = folder.join("chats.json");
         let mut store = Store::open(&file);
         store.put(chat("a", "Kept", 5));
+        store.put_with_provider(chat("b", "Claude chat", 6), Provider::Claude);
         let reopened = Store::open(&file);
-        assert_eq!(reopened.get("a").map(|chat| chat.title.as_str()), Some("Kept"));
+        assert_eq!(
+            reopened.get("a").map(|chat| chat.title.as_str()),
+            Some("Kept")
+        );
+        assert_eq!(reopened.provider("b"), Some(Provider::Claude));
+        assert_eq!(reopened.provider("a"), Some(Provider::Codex));
+        std::fs::write(&file, r#"{"chats":[{"id":"old","title":"Before providers","project":"/p","updated":1,"messages":1}]}"#)
+            .expect("legacy store fixture");
+        assert!(Store::open(&file).get("old").is_some());
+        assert_eq!(Store::open(&file).provider("old"), Some(Provider::Codex));
         // A file that is not the list is an empty list, not a failure.
         std::fs::write(&file, "not json").expect("writes");
         assert!(Store::open(&file).list("").is_empty());
