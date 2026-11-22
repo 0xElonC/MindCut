@@ -5,88 +5,54 @@
 //!
 //! Requests are built here as plain JSON so that each is testable without a
 //! process. Events are read into [`Update`], whose parts are the ones the
-//! chat draws: a message, some words arriving, a tool call and how it went.
-
-use std::path::PathBuf;
+//! chat draws (`vocab`).
 
 use serde_json::{Map, Value, json};
 
-/// The Concat MCP server the agent is started with: how it edits.
-#[derive(Debug, Clone, PartialEq)]
-pub struct McpServer {
-    pub command: String,
-    pub args: Vec<String>,
-    pub env: Vec<(String, String)>,
-}
+use crate::vocab::{
+    COMMON_EFFORTS, Input, Item, Model, SERVER_NAME, Skill, ThreadSetup, ToolState, Update, shorten,
+};
 
-/// What a thread (one conversation) is started or resumed with.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ThreadSetup {
-    /// The project folder, which is also where the agent's own commands run.
-    pub cwd: String,
-    /// `None` takes the model from the person's Codex settings.
-    pub model: Option<String>,
-    /// What the agent is told about its job and the project it is in.
-    pub instructions: String,
-    pub mcp: McpServer,
-}
-
-/// The name the Concat MCP server goes by in Codex, and so in the tool
-/// calls a conversation shows.
-pub const SERVER_NAME: &str = "eloncut";
-
-impl ThreadSetup {
-    fn fields(&self) -> Map<String, Value> {
-        let mut env = Map::new();
-        for (key, value) in &self.mcp.env {
-            env.insert(key.clone(), json!(value));
-        }
-        let mut object = Map::new();
-        object.insert("cwd".into(), json!(self.cwd));
-        // The person chose to let the agent act on its own: nothing waits
-        // for an approval, and the commands it runs are not fenced in.
-        object.insert("approvalPolicy".into(), json!("never"));
-        object.insert("sandbox".into(), json!("danger-full-access"));
-        object.insert("developerInstructions".into(), json!(self.instructions));
-        if let Some(model) = &self.model {
-            object.insert("model".into(), json!(model));
-        }
-        object.insert(
-            "config".into(),
-            json!({
-                "mcp_servers": {
-                    SERVER_NAME: {
-                        "command": self.mcp.command,
-                        "args": self.mcp.args,
-                        "env": env,
-                    }
+fn setup_fields(setup: &ThreadSetup) -> Map<String, Value> {
+    let mut env = Map::new();
+    for (key, value) in &setup.mcp.env {
+        env.insert(key.clone(), json!(value));
+    }
+    let mut object = Map::new();
+    object.insert("cwd".into(), json!(setup.cwd));
+    // The person chose to let the agent act on its own: nothing waits
+    // for an approval, and the commands it runs are not fenced in.
+    object.insert("approvalPolicy".into(), json!("never"));
+    object.insert("sandbox".into(), json!("danger-full-access"));
+    object.insert("developerInstructions".into(), json!(setup.instructions));
+    if let Some(model) = &setup.model {
+        object.insert("model".into(), json!(model));
+    }
+    object.insert(
+        "config".into(),
+        json!({
+            "mcp_servers": {
+                SERVER_NAME: {
+                    "command": setup.mcp.command,
+                    "args": setup.mcp.args,
+                    "env": env,
                 }
-            }),
-        );
-        object
-    }
-
-    /// `thread/start`.
-    pub fn start_params(&self) -> Value {
-        Value::Object(self.fields())
-    }
-
-    /// `thread/resume`.
-    pub fn resume_params(&self, thread: &str) -> Value {
-        let mut object = self.fields();
-        object.insert("threadId".into(), json!(thread));
-        Value::Object(object)
-    }
+            }
+        }),
+    );
+    object
 }
 
-/// One thing sent with a message.
-#[derive(Debug, Clone, PartialEq)]
-pub enum Input {
-    Text(String),
-    /// A picture the model looks at.
-    Image(PathBuf),
-    /// A skill the person chose to bring into the message.
-    Skill { name: String, path: String },
+/// `thread/start`.
+pub fn start_params(setup: &ThreadSetup) -> Value {
+    Value::Object(setup_fields(setup))
+}
+
+/// `thread/resume`.
+pub fn resume_params(setup: &ThreadSetup, thread: &str) -> Value {
+    let mut object = setup_fields(setup);
+    object.insert("threadId".into(), json!(thread));
+    Value::Object(object)
 }
 
 /// `turn/start`: one message, and how hard to think about it.
@@ -116,15 +82,6 @@ pub fn turn_params(
         object.insert("effort".into(), json!(effort));
     }
     Value::Object(object)
-}
-
-/// A skill the agent can be pointed at.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Skill {
-    pub name: String,
-    pub description: String,
-    /// The `SKILL.md` Codex reads it from.
-    pub path: String,
 }
 
 /// `skills/list`, for what is available in `cwd`.
@@ -164,18 +121,6 @@ pub fn read_skills(result: &Value) -> Vec<Skill> {
 pub fn interrupt_params(thread: &str, turn: &str) -> Value {
     json!({ "threadId": thread, "turnId": turn })
 }
-
-/// A model Codex offers, and the depths of thought it takes.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Model {
-    pub id: String,
-    pub name: String,
-    pub efforts: Vec<String>,
-    pub default_effort: String,
-}
-
-/// The depths a model that does not say gets: what every Codex model takes.
-pub const COMMON_EFFORTS: [&str; 4] = ["low", "medium", "high", "xhigh"];
 
 /// Reads `model/list`.
 pub fn read_models(result: &Value) -> Vec<Model> {
@@ -228,63 +173,6 @@ pub fn read_defaults(result: &Value) -> (Option<String>, Option<String>) {
             .map(str::to_owned)
     };
     (text("model"), text("model_reasoning_effort"))
-}
-
-/// How a tool call stands.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ToolState {
-    Running,
-    Done,
-    Failed,
-}
-
-/// One entry of a conversation, as the chat draws it.
-#[derive(Debug, Clone, PartialEq)]
-pub enum Item {
-    User {
-        id: String,
-        text: String,
-        /// Pictures that went with it.
-        images: Vec<String>,
-    },
-    Agent {
-        id: String,
-        text: String,
-    },
-    Reasoning {
-        id: String,
-        text: String,
-    },
-    Tool {
-        id: String,
-        name: String,
-        /// One line: what it was given, shortened.
-        summary: String,
-        input: String,
-        output: String,
-        state: ToolState,
-    },
-}
-
-impl Item {
-    pub fn id(&self) -> &str {
-        match self {
-            Item::User { id, .. }
-            | Item::Agent { id, .. }
-            | Item::Reasoning { id, .. }
-            | Item::Tool { id, .. } => id,
-        }
-    }
-}
-
-fn shorten(text: &str, longest: usize) -> String {
-    let flat: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if flat.chars().count() <= longest {
-        flat
-    } else {
-        let head: String = flat.chars().take(longest).collect();
-        format!("{head}…")
-    }
 }
 
 fn state_of(status: Option<&str>) -> ToolState {
@@ -430,52 +318,6 @@ pub fn read_history(thread: &Value) -> Vec<Item> {
         .collect()
 }
 
-/// What an event means to the chat.
-#[derive(Debug, Clone, PartialEq)]
-pub enum Update {
-    TurnStarted {
-        thread: String,
-        turn: String,
-    },
-    TurnEnded {
-        thread: String,
-        turn: String,
-        /// "completed", "interrupted" or "failed".
-        status: String,
-        error: Option<String>,
-    },
-    ItemStarted {
-        thread: String,
-        item: Item,
-    },
-    ItemDone {
-        thread: String,
-        item: Item,
-    },
-    /// Words of an answer arriving.
-    AgentWords {
-        thread: String,
-        item: String,
-        words: String,
-    },
-    /// Words of a thought arriving.
-    ThoughtWords {
-        thread: String,
-        item: String,
-        words: String,
-    },
-    /// The agent's name for the conversation.
-    Named {
-        thread: String,
-        name: String,
-    },
-    /// Something the person should hear, on a thread or on none.
-    Trouble {
-        thread: Option<String>,
-        message: String,
-    },
-}
-
 /// Reads a notification. The many that the chat has no use for are `None`.
 pub fn read_update(method: &str, params: &Value) -> Option<Update> {
     let text = |value: &Value, key: &str| value.get(key).and_then(Value::as_str).map(str::to_owned);
@@ -553,6 +395,7 @@ pub fn auto_answer(method: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::vocab::McpServer;
 
     fn setup() -> ThreadSetup {
         ThreadSetup {
@@ -569,7 +412,7 @@ mod tests {
 
     #[test]
     fn a_thread_starts_with_the_mcp_server_and_no_waiting_for_approval() {
-        let params = setup().start_params();
+        let params = start_params(&setup());
         assert_eq!(params["approvalPolicy"], "never");
         assert_eq!(params["sandbox"], "danger-full-access");
         assert_eq!(params["model"], "gpt-x");
@@ -577,7 +420,7 @@ mod tests {
         assert_eq!(server["command"], "/app/concat");
         assert_eq!(server["args"], json!(["--mcp", "window"]));
         assert_eq!(server["env"]["CONCAT_API_TOKEN"], "t");
-        let resumed = setup().resume_params("t1");
+        let resumed = resume_params(&setup(), "t1");
         assert_eq!(resumed["threadId"], "t1");
         assert_eq!(resumed["config"], params["config"]);
     }
@@ -586,7 +429,7 @@ mod tests {
     fn a_model_left_to_the_settings_is_not_named() {
         let mut setup = setup();
         setup.model = None;
-        assert!(setup.start_params().get("model").is_none());
+        assert!(start_params(&setup).get("model").is_none());
     }
 
     #[test]

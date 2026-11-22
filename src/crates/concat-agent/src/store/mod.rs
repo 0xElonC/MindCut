@@ -8,6 +8,8 @@
 //! had in this app, which project each was about, or what the person has
 //! named them, so the app keeps that: one small JSON file of entries.
 
+pub mod transcript;
+
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
@@ -15,7 +17,7 @@ use serde_json::{Value, json};
 /// One conversation in the list.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Chat {
-    /// Codex's id for the thread.
+    /// The program's id for the conversation.
     pub id: String,
     pub title: String,
     /// The project folder it was about.
@@ -23,6 +25,9 @@ pub struct Chat {
     /// When it last changed, in seconds since the epoch.
     pub updated: u64,
     pub messages: u32,
+    /// Which backend it was had with ([`crate::backend::BackendId`]'s name).
+    /// A list written before there were several says Codex.
+    pub backend: String,
 }
 
 /// The list, newest first, and the file it is kept in.
@@ -65,6 +70,11 @@ impl Store {
                     project: chat.get("project")?.as_str()?.to_owned(),
                     updated: chat.get("updated")?.as_u64()?,
                     messages: chat.get("messages")?.as_u64()? as u32,
+                    backend: chat
+                        .get("backend")
+                        .and_then(Value::as_str)
+                        .unwrap_or("codex")
+                        .to_owned(),
                 })
             })
             .collect()
@@ -78,7 +88,7 @@ impl Store {
             .map(|chat| {
                 json!({
                     "id": chat.id, "title": chat.title, "project": chat.project,
-                    "updated": chat.updated, "messages": chat.messages,
+                    "updated": chat.updated, "messages": chat.messages, "backend": chat.backend,
                 })
             })
             .collect();
@@ -141,7 +151,14 @@ mod tests {
     use super::*;
 
     fn chat(id: &str, title: &str, updated: u64) -> Chat {
-        Chat { id: id.into(), title: title.into(), project: "/p".into(), updated, messages: 2 }
+        Chat {
+            id: id.into(),
+            title: title.into(),
+            project: "/p".into(),
+            updated,
+            messages: 2,
+            backend: "codex".into(),
+        }
     }
 
     #[test]
@@ -180,5 +197,15 @@ mod tests {
         std::fs::write(&file, "not json").expect("writes");
         assert!(Store::open(&file).list("").is_empty());
         let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    #[test]
+    fn a_list_from_before_there_were_several_backends_says_codex() {
+        let old = serde_json::json!({ "chats": [{
+            "id": "x", "title": "Old", "project": "/p", "updated": 1, "messages": 3,
+        }]});
+        let chats = Store::read(&old);
+        assert_eq!(chats.len(), 1);
+        assert_eq!(chats[0].backend, "codex");
     }
 }

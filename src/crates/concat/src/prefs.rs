@@ -43,6 +43,10 @@ pub struct Preferences {
     pub dark: Option<bool>,
     /// The parent folder of the last project created successfully.
     pub last_project_location: Option<String>,
+    /// The agent the last conversation in the Agent pane was begun with, by
+    /// the name its backend is kept under (`concat_agent::backend::BackendId`).
+    /// `None`, or one that is no longer there, is the first on the list.
+    pub agent_backend: Option<String>,
     /// The accent, by the lower-cased name the theme lists it under —
     /// "lime", "sky", ... — or as "#rrggbb" for a colour picked by hand.
     /// `None`, or a name no longer on the list, is the first one, which is

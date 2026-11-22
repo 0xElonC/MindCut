@@ -25,12 +25,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use concat_agent::rpc::{Codex, Incoming};
+use concat_agent::backend::{self, Backend, Client, Descriptor, Event, Turn};
+use concat_agent::store::transcript::{Recorder, Transcripts};
 use concat_agent::store::{Chat, Store};
-use concat_agent::wire::{
-    self, Input, Item, McpServer, Model, Skill, ThreadSetup, ToolState, Update,
+use concat_agent::vocab::{
+    COMMON_EFFORTS, Input, Item, McpServer, Model, Skill, ThreadSetup, ToolState, Update,
 };
-use serde_json::{Value, json};
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 
 use crate::host::Shell;
@@ -85,23 +85,50 @@ impl Line {
     }
 }
 
-/// How the agent is running.
+/// How one backend's program is running.
 enum Link {
+    /// Not started: nothing has needed it yet.
+    Idle,
     Starting,
     Missing,
     Failed(String),
     Ready,
 }
 
-struct Controller {
+/// What is known of one backend's program. Each backend has one, and the
+/// conversation on screen is with the backend whose slot is `descriptor`'s.
+struct Slot {
     link: Link,
-    codex: Option<Arc<Codex>>,
+    /// The program, once it has started.
+    backend: Option<Arc<dyn Backend>>,
     models: Vec<Model>,
-    /// What the person's own Codex settings choose.
+    /// What the person's own settings for the program choose.
     defaults: (Option<String>, Option<String>),
+}
+
+impl Default for Slot {
+    fn default() -> Slot {
+        Slot {
+            link: Link::Idle,
+            backend: None,
+            models: Vec::new(),
+            defaults: (None, None),
+        }
+    }
+}
+
+struct Controller {
+    /// Every backend there is, by id.
+    slots: HashMap<&'static str, Slot>,
+    /// The backend of the conversation on screen, or of the next one: what
+    /// is found, started and asked about.
+    descriptor: &'static Descriptor,
     model: usize,
     effort: usize,
     store: Store,
+    /// The record of the conversations whose program does not keep it.
+    transcripts: Transcripts,
+    recorder: Recorder,
     query: String,
     /// The thread on screen, once it exists: the first message creates it.
     current: Option<String>,
@@ -120,7 +147,8 @@ struct Controller {
     minted: u64,
     /// What the pane last said the project was called.
     shown_project: String,
-    /// The skills Codex has, as last asked, and the search over them.
+    /// The skills the current backend has, as last asked, and the search
+    /// over them.
     skills: Vec<Skill>,
     skill_query: String,
     /// The skills chosen for the next message.
@@ -312,45 +340,57 @@ impl Controller {
         format!("{kind}{}", self.minted)
     }
 
+    /// The slot of the backend the conversation on screen is with.
+    fn slot(&self) -> &Slot {
+        self.slots
+            .get(self.descriptor.id.0)
+            .expect("every backend has a slot")
+    }
+
     fn model_id(&self) -> Option<String> {
-        self.models.get(self.model).map(|model| model.id.clone())
+        self.slot().models.get(self.model).map(|model| model.id.clone())
     }
 
     fn efforts(&self) -> Vec<String> {
-        self.models
+        self.slot()
+            .models
             .get(self.model)
             .map(|model| model.efforts.clone())
-            .unwrap_or_else(|| wire::COMMON_EFFORTS.map(str::to_owned).to_vec())
+            .unwrap_or_else(|| COMMON_EFFORTS.map(str::to_owned).to_vec())
     }
 
     fn effort_id(&self) -> Option<String> {
         self.efforts().get(self.effort).cloned()
     }
 
-    /// Picks the model and depth Codex would start with, from what the
-    /// person's own settings say.
+    /// Picks the model and depth the current backend would start with, from
+    /// what the person's own settings say.
     fn choose_defaults(&mut self) {
-        let (model, effort) = self.defaults.clone();
+        let slot = self
+            .slots
+            .get_mut(self.descriptor.id.0)
+            .expect("every backend has a slot");
+        let (model, effort) = slot.defaults.clone();
         if let Some(model) = &model {
-            // A model the settings name that Codex does not list - a
+            // A model the settings name that the program does not list - a
             // provider of the person's own - is offered all the same.
-            if !self.models.iter().any(|known| &known.id == model) {
-                self.models.insert(
+            if !slot.models.iter().any(|known| &known.id == model) {
+                slot.models.insert(
                     0,
                     Model {
                         id: model.clone(),
                         name: model.clone(),
-                        efforts: wire::COMMON_EFFORTS.map(str::to_owned).to_vec(),
+                        efforts: COMMON_EFFORTS.map(str::to_owned).to_vec(),
                         default_effort: effort.clone().unwrap_or_else(|| "medium".into()),
                     },
                 );
             }
         }
         self.model = model
-            .and_then(|model| self.models.iter().position(|known| known.id == model))
+            .and_then(|model| slot.models.iter().position(|known| known.id == model))
             .unwrap_or(0);
+        let wanted = effort.or_else(|| slot.models.get(self.model).map(|m| m.default_effort.clone()));
         let efforts = self.efforts();
-        let wanted = effort.or_else(|| self.models.get(self.model).map(|m| m.default_effort.clone()));
         self.effort = wanted
             .and_then(|wanted| efforts.iter().position(|known| *known == wanted))
             .unwrap_or(0);
@@ -380,29 +420,55 @@ impl Controller {
 
     fn publish(&mut self, shell: &Shell, app: &App) {
         let chat = app.global::<AgentChat>();
-        match &self.link {
-            Link::Ready => {
-                chat.set_status(AgentStatus::Ready);
-                chat.set_status_detail(SharedString::new());
+        let name = self.descriptor.name;
+        let link = &self.slot().link;
+        chat.set_status(match link {
+            Link::Ready => AgentStatus::Ready,
+            Link::Idle | Link::Starting => AgentStatus::Connecting,
+            Link::Missing => AgentStatus::Missing,
+            Link::Failed(_) => AgentStatus::Failed,
+        });
+        let (title, body) = match link {
+            Link::Ready => (String::new(), String::new()),
+            Link::Idle | Link::Starting => {
+                (tf("agent.connecting", &[&name]), tf("agent.connectingBody", &[&name]))
             }
-            Link::Starting => {
-                chat.set_status(AgentStatus::Connecting);
-                chat.set_status_detail(SharedString::new());
+            Link::Missing => (tf("agent.missingTitle", &[&name]), tf("agent.missingBody", &[&name])),
+            Link::Failed(reason) if reason.is_empty() => {
+                (tf("agent.failedTitle", &[&name]), t("agent.failedBody"))
             }
-            Link::Missing => {
-                chat.set_status(AgentStatus::Missing);
-                chat.set_status_detail(SharedString::new());
-            }
-            Link::Failed(reason) => {
-                chat.set_status(AgentStatus::Failed);
-                chat.set_status_detail(reason.as_str().into());
-            }
-        }
+            Link::Failed(reason) => (tf("agent.failedTitle", &[&name]), reason.clone()),
+        };
+        chat.set_status_title(title.into());
+        chat.set_status_body(body.into());
+        let hint = match (link, self.descriptor.install.command) {
+            (Link::Missing, Some(command)) => tf("agent.installWith", &[&command]),
+            _ => String::new(),
+        };
+        chat.set_install_hint(hint.into());
+        // Which program the conversation is with, and whether it may still
+        // be changed: it may until the first message is sent.
+        chat.set_backends(ModelRc::new(VecModel::from(
+            backend::REGISTRY
+                .iter()
+                .map(|descriptor| SharedString::from(descriptor.name))
+                .collect::<Vec<_>>(),
+        )));
+        chat.set_backend_index(
+            backend::REGISTRY
+                .iter()
+                .position(|descriptor| descriptor.id == self.descriptor.id)
+                .unwrap_or(0) as i32,
+        );
+        chat.set_backend_locked(self.current.is_some());
+        chat.set_has_efforts(self.descriptor.caps.efforts && !self.efforts().is_empty());
+        chat.set_has_skills(self.descriptor.caps.skills);
         chat.set_busy(self.busy);
         chat.set_activity(self.activity().into());
         chat.set_live(self.live.load(Ordering::Relaxed));
         chat.set_models(ModelRc::new(VecModel::from(
-            self.models
+            self.slot()
+                .models
                 .iter()
                 .map(|model| SharedString::from(model.name.as_str()))
                 .collect::<Vec<_>>(),
@@ -526,7 +592,13 @@ impl Controller {
             .map(|entry| AgentSession {
                 id: entry.id.as_str().into(),
                 title: entry.title.as_str().into(),
-                detail: format!("{} · {}", folder_name(&entry.project), ago(entry.updated)).into(),
+                detail: if backend::REGISTRY.len() > 1 {
+                    let name = backend::find(&entry.backend).map_or(entry.backend.as_str(), |d| d.name);
+                    format!("{name} · {} · {}", folder_name(&entry.project), ago(entry.updated))
+                } else {
+                    format!("{} · {}", folder_name(&entry.project), ago(entry.updated))
+                }
+                .into(),
                 count: entry.messages as i32,
                 running: self.busy && self.current.as_deref() == Some(entry.id.as_str()),
                 current: self.current.as_deref() == Some(entry.id.as_str()),
@@ -537,79 +609,92 @@ impl Controller {
 
     // ── starting the agent ──
 
-    fn begin(&mut self, shell: &Shell, app: &App) {
-        self.link = Link::Starting;
-        self.codex = None;
+    /// Starts `descriptor`'s program if nothing has yet.
+    fn ensure(&mut self, descriptor: &'static Descriptor, shell: &Shell, app: &App) {
+        if matches!(self.slots.entry(descriptor.id.0).or_default().link, Link::Idle) {
+            self.begin(descriptor, shell, app);
+        }
+    }
+
+    fn begin(&mut self, descriptor: &'static Descriptor, shell: &Shell, app: &App) {
+        let slot = self.slots.entry(descriptor.id.0).or_default();
+        slot.link = Link::Starting;
+        slot.backend = None;
         self.publish(shell, app);
-        std::thread::spawn(|| {
-            let Some(program) = concat_agent::locate::codex() else {
-                post(|c, shell, app| {
-                    c.link = Link::Missing;
+        std::thread::spawn(move || {
+            let Some(program) = (descriptor.locate)() else {
+                post(move |c, shell, app| {
+                    c.slots.entry(descriptor.id.0).or_default().link = Link::Missing;
                     c.publish(shell, app);
                 });
                 return;
             };
             log::info!("agent: starting {}", program.display());
-            let spawned = Codex::spawn(&program, |incoming| {
-                post(move |c, shell, app| c.heard(incoming, shell, app));
+            let client = Client {
+                name: "eloncut".into(),
+                title: "ElonCut".into(),
+                version: env!("CARGO_PKG_VERSION").into(),
+            };
+            let connected = backend::connect(descriptor, &program, &client, move |event| {
+                post(move |c, shell, app| c.heard(descriptor, event, shell, app));
             });
-            let codex = match spawned.and_then(|codex| {
-                codex.handshake("eloncut", "ElonCut", env!("CARGO_PKG_VERSION"))?;
-                Ok(codex)
-            }) {
-                Ok(codex) => codex,
+            match connected {
                 Err(error) => {
-                    log::warn!("agent: Codex did not start: {error}");
+                    log::warn!("agent: {} did not start: {error}", descriptor.name);
                     post(move |c, shell, app| {
-                        c.link = Link::Failed(error);
+                        c.slots.entry(descriptor.id.0).or_default().link = Link::Failed(error);
                         c.publish(shell, app);
                     });
-                    return;
                 }
-            };
-            let patience = Duration::from_secs(20);
-            let models = codex
-                .call_blocking("model/list", json!({}), patience)
-                .map(|result| wire::read_models(&result))
-                .unwrap_or_default();
-            let defaults = codex
-                .call_blocking("config/read", json!({}), patience)
-                .map(|result| wire::read_defaults(&result))
-                .unwrap_or_default();
-            let codex = Arc::new(codex);
-            post(move |c, shell, app| {
-                c.models = models;
-                c.defaults = defaults;
-                c.choose_defaults();
-                c.codex = Some(codex);
-                c.link = Link::Ready;
-                c.load_skills(shell);
-                c.publish(shell, app);
-            });
+                Ok(connected) => post(move |c, shell, app| {
+                    let slot = c.slots.entry(descriptor.id.0).or_default();
+                    slot.models = connected.models.list;
+                    slot.defaults = (connected.models.default_model, connected.models.default_effort);
+                    slot.backend = Some(connected.backend);
+                    slot.link = Link::Ready;
+                    if c.descriptor.id == descriptor.id {
+                        c.choose_defaults();
+                        c.load_skills(shell);
+                    }
+                    // A conversation of this program opened while it was
+                    // starting is taken up now. One of another program's is
+                    // left alone: it is not waiting for this.
+                    let waiting = c
+                        .current
+                        .as_deref()
+                        .and_then(|thread| c.store.get(thread))
+                        .is_some_and(|chat| chat.backend == descriptor.id.0);
+                    if waiting {
+                        c.take_up(shell, app);
+                    }
+                    c.publish(shell, app);
+                }),
+            }
         });
     }
 
-    /// What Codex said without being asked.
-    fn heard(&mut self, incoming: Incoming, shell: &Shell, app: &App) {
-        match incoming {
-            Incoming::Notification { method, params } => {
-                if let Some(update) = wire::read_update(&method, &params) {
-                    self.update(update);
-                    self.publish(shell, app);
-                }
+    /// What a program said without being asked.
+    fn heard(&mut self, from: &'static Descriptor, event: Event, shell: &Shell, app: &App) {
+        match event {
+            Event::Update(update) => {
+                self.update(update);
+                self.publish(shell, app);
             }
-            Incoming::Request { id, method, .. } => {
-                if let Some(codex) = &self.codex {
-                    codex.respond(id, wire::auto_answer(&method));
+            Event::Closed(reason) => {
+                log::warn!("agent: {} ended: {reason}", from.name);
+                let slot = self.slots.entry(from.id.0).or_default();
+                slot.backend = None;
+                slot.link = Link::Failed(reason);
+                // What was running in the conversation on screen is over,
+                // and every conversation of that program is to be taken up
+                // again when it is next used.
+                if self.descriptor.id == from.id {
+                    self.busy = false;
+                    self.turn = None;
                 }
-            }
-            Incoming::Closed(reason) => {
-                log::warn!("agent: Codex ended: {reason}");
-                self.codex = None;
-                self.busy = false;
-                self.turn = None;
-                self.loaded.clear();
-                self.link = Link::Failed(reason);
+                let store = &self.store;
+                self.loaded
+                    .retain(|thread, _| store.get(thread).is_none_or(|chat| chat.backend != from.id.0));
                 self.publish(shell, app);
             }
         }
@@ -678,6 +763,9 @@ impl Controller {
     }
 
     fn update(&mut self, update: Update) {
+        // What is said in a conversation whose program does not keep it is
+        // kept here, whichever conversation is on screen.
+        self.recorder.feed(&update);
         let ours = |thread: &str, current: &Option<String>| current.as_deref() == Some(thread);
         match update {
             Update::TurnStarted { thread, turn } if ours(&thread, &self.current) => {
@@ -827,11 +915,14 @@ impl Controller {
         ))
     }
 
-    /// Asks Codex which skills there are for the project the window has.
+    /// Asks the program which skills there are for the project the window has.
     fn load_skills(&mut self, shell: &Shell) {
-        let Some(codex) = self.codex.clone() else {
+        let Some(backend) = self.slot().backend.clone() else {
             return;
         };
+        if !self.descriptor.caps.skills {
+            return;
+        }
         let cwd = shell
             .studio
             .borrow()
@@ -840,14 +931,17 @@ impl Controller {
             .map(|session| session.path().to_owned())
             .or_else(home_dir)
             .unwrap_or_else(|| ".".into());
-        codex.call("skills/list", wire::skills_params(&cwd), |reply| {
-            post(move |c, shell, app| {
-                if let Ok(result) = reply {
-                    c.skills = wire::read_skills(&result);
-                    c.publish(shell, app);
-                }
-            });
-        });
+        backend.skills(
+            &cwd,
+            Box::new(|reply| {
+                post(move |c, shell, app| {
+                    if let Ok(skills) = reply {
+                        c.skills = skills;
+                        c.publish(shell, app);
+                    }
+                });
+            }),
+        );
     }
 
     fn add_files(&mut self, paths: Vec<PathBuf>) {
@@ -865,7 +959,7 @@ impl Controller {
     }
 
     fn send(&mut self, shell: &Shell, app: &App, text: String) {
-        let Some(codex) = self.codex.clone() else {
+        let Some(backend) = self.slot().backend.clone() else {
             return;
         };
         if self.busy {
@@ -900,7 +994,17 @@ impl Controller {
             });
         }
 
+        // What the person said, as the record keeps it.
         let id = self.mint("u");
+        let said_item = Item::User {
+            id: format!("{id}-{}", now()),
+            text: text.clone(),
+            images: files
+                .iter()
+                .filter(|file| file.shown.kind == "image")
+                .map(|file| file.path.to_string_lossy().into_owned())
+                .collect(),
+        };
         let mut said = Line::new(&id, AgentRole::User);
         said.text = text.clone();
         said.images = skills
@@ -934,10 +1038,16 @@ impl Controller {
             text.chars().take(36).collect()
         };
         let project = setup.cwd.clone();
+        let backend_id = self.descriptor.id.0;
 
-        let asking = Arc::clone(&codex);
+        let asking = Arc::clone(&backend);
+        let keeps_record = !self.descriptor.caps.remote_history;
         let go = move |c: &mut Controller, thread: String, key: String| {
             c.loaded.insert(thread.clone(), key);
+            if keeps_record {
+                c.recorder.watch(&thread);
+                c.recorder.said(&thread, said_item);
+            }
             c.begin_turn(&asking, &thread, inputs, model, effort);
         };
         match self.current.clone() {
@@ -945,47 +1055,45 @@ impl Controller {
                 go(self, thread, key);
             }
             Some(thread) => {
-                let params = setup.resume_params(&thread);
-                codex.call("thread/resume", params, move |reply| {
-                    post(move |c, shell, app| {
-                        match reply {
-                            Ok(_) => go(c, thread, key),
-                            Err(error) => c.fail_turn(&error),
-                        }
-                        c.publish(shell, app);
-                    });
-                });
+                backend.resume(
+                    &thread.clone(),
+                    &setup,
+                    Box::new(move |reply| {
+                        post(move |c, shell, app| {
+                            match reply {
+                                Ok(_) => go(c, thread, key),
+                                Err(error) => c.fail_turn(&error),
+                            }
+                            c.publish(shell, app);
+                        });
+                    }),
+                );
             }
             None => {
-                codex.call("thread/start", setup.start_params(), move |reply| {
-                    post(move |c, shell, app| {
-                        match reply {
-                            Ok(result) => {
-                                let id = result
-                                    .get("thread")
-                                    .and_then(|thread| thread.get("id"))
-                                    .and_then(Value::as_str)
-                                    .map(str::to_owned);
-                                match id {
-                                    Some(thread) => {
-                                        c.current = Some(thread.clone());
-                                        c.store.put(Chat {
-                                            id: thread.clone(),
-                                            title,
-                                            project,
-                                            updated: now(),
-                                            messages: 1,
-                                        });
-                                        go(c, thread, key);
-                                    }
-                                    None => c.fail_turn("Codex did not start a conversation"),
+                self.remember(shell);
+                backend.start(
+                    &setup,
+                    Box::new(move |reply| {
+                        post(move |c, shell, app| {
+                            match reply {
+                                Ok(thread) => {
+                                    c.current = Some(thread.clone());
+                                    c.store.put(Chat {
+                                        id: thread.clone(),
+                                        title,
+                                        project,
+                                        updated: now(),
+                                        messages: 1,
+                                        backend: backend_id.to_owned(),
+                                    });
+                                    go(c, thread, key);
                                 }
+                                Err(error) => c.fail_turn(&error),
                             }
-                            Err(error) => c.fail_turn(&error),
-                        }
-                        c.publish(shell, app);
-                    });
-                });
+                            c.publish(shell, app);
+                        });
+                    }),
+                );
             }
         }
         self.publish(shell, app);
@@ -993,41 +1101,39 @@ impl Controller {
 
     fn begin_turn(
         &mut self,
-        codex: &Arc<Codex>,
+        backend: &Arc<dyn Backend>,
         thread: &str,
         inputs: Vec<Input>,
         model: Option<String>,
         effort: Option<String>,
     ) {
-        let params = wire::turn_params(thread, &inputs, model.as_deref(), effort.as_deref());
-        codex.call("turn/start", params, move |reply| {
-            post(move |c, shell, app| {
-                match reply {
-                    Ok(result) => {
-                        c.turn = result
-                            .get("turn")
-                            .and_then(|turn| turn.get("id"))
-                            .and_then(Value::as_str)
-                            .map(str::to_owned);
+        let turn = Turn {
+            thread: thread.to_owned(),
+            inputs,
+            model,
+            effort,
+        };
+        backend.send(
+            turn,
+            Box::new(move |reply| {
+                post(move |c, shell, app| {
+                    match reply {
+                        Ok(turn) => c.turn = turn,
+                        Err(error) => c.fail_turn(&error),
                     }
-                    Err(error) => c.fail_turn(&error),
-                }
-                c.publish(shell, app);
-            });
-        });
+                    c.publish(shell, app);
+                });
+            }),
+        );
     }
 
     fn stop(&mut self) {
-        let (Some(codex), Some(thread), Some(turn)) =
-            (&self.codex, &self.current, &self.turn)
+        let (Some(backend), Some(thread), Some(turn)) =
+            (&self.slot().backend, &self.current, &self.turn)
         else {
             return;
         };
-        codex.call("turn/interrupt", wire::interrupt_params(thread, turn), |reply| {
-            if let Err(error) = reply {
-                log::warn!("agent: stopping the turn failed: {error}");
-            }
-        });
+        backend.interrupt(thread, turn);
     }
 
     fn new_chat(&mut self) {
@@ -1039,51 +1145,123 @@ impl Controller {
         self.busy = false;
     }
 
+    /// Makes `descriptor`'s program the one the conversation on screen is
+    /// with: its models and depths, its skills, and its program started if
+    /// nothing has needed it yet.
+    fn enter(&mut self, descriptor: &'static Descriptor, shell: &Shell, app: &App) {
+        self.descriptor = descriptor;
+        self.skills.clear();
+        self.picked.clear();
+        self.choose_defaults();
+        self.ensure(descriptor, shell, app);
+        self.load_skills(shell);
+    }
+
+    /// Remembers which program the person last began a conversation with, so
+    /// that the next one is with it too.
+    fn remember(&self, shell: &Shell) {
+        let mut studio = shell.studio.borrow_mut();
+        let studio = &mut *studio;
+        if studio.prefs.agent_backend.as_deref() != Some(self.descriptor.id.0) {
+            studio.prefs.agent_backend = Some(self.descriptor.id.0.to_owned());
+            studio.prefs.save(&studio.host.dirs);
+        }
+    }
+
     fn open_chat(&mut self, shell: &Shell, app: &App, id: &str) {
-        let Some(codex) = self.codex.clone() else {
-            return;
-        };
         let Some(chat) = self.store.get(id).cloned() else {
             return;
         };
+        self.new_chat();
+        // The conversation goes on with the program it began with.
+        let descriptor = backend::find(&chat.backend).unwrap_or(self.descriptor);
+        self.enter(descriptor, shell, app);
+        self.current = Some(chat.id.clone());
+        if !descriptor.caps.remote_history {
+            // What this program does not keep is read from the record.
+            self.recorder.watch(&chat.id);
+            let (items, _damaged) = self.transcripts.read(&chat.id);
+            if items.is_empty() && chat.messages > 0 {
+                let id = self.mint("n");
+                self.lines
+                    .push(Line::notice(&id, &tf("agent.recordMissing", &[&descriptor.name])));
+            }
+            for item in &items {
+                self.put_item(item, true);
+            }
+        }
+        self.take_up(shell, app);
+        self.publish(shell, app);
+    }
+
+    /// Takes the conversation on screen up again in its program, once the
+    /// program is there: its history is read back when the program keeps it,
+    /// and what it needs to go on is given it again.
+    fn take_up(&mut self, shell: &Shell, app: &App) {
+        let Some(thread) = self.current.clone() else {
+            return;
+        };
+        let Some(descriptor) = self
+            .store
+            .get(&thread)
+            .and_then(|chat| backend::find(&chat.backend))
+        else {
+            return;
+        };
+        let Some(backend) = self
+            .slots
+            .get(descriptor.id.0)
+            .and_then(|slot| slot.backend.clone())
+        else {
+            return;
+        };
+        // What is already taken up, and shown from the record, is left.
+        if !descriptor.caps.remote_history && self.loaded.contains_key(&thread) {
+            return;
+        }
         let (setup, key) = match self.setup(shell) {
             Ok(done) => done,
             Err(error) => {
-                self.new_chat();
                 self.fail_turn(&error);
                 self.publish(shell, app);
                 return;
             }
         };
-        self.new_chat();
-        self.current = Some(chat.id.clone());
-        self.publish(shell, app);
-        let thread = chat.id;
-        codex.call("thread/resume", setup.resume_params(&thread), move |reply| {
-            post(move |c, shell, app| {
-                if c.current.as_deref() != Some(thread.as_str()) {
-                    return;
-                }
-                match reply {
-                    Ok(result) => {
-                        c.loaded.insert(thread, key);
-                        let items = result.get("thread").map(wire::read_history).unwrap_or_default();
-                        c.lines.clear();
-                        for item in &items {
-                            c.put_item(item, true);
-                        }
+        let remote_history = descriptor.caps.remote_history;
+        backend.resume(
+            &thread.clone(),
+            &setup,
+            Box::new(move |reply| {
+                post(move |c, shell, app| {
+                    if c.current.as_deref() != Some(thread.as_str()) {
+                        return;
                     }
-                    Err(error) => c.fail_turn(&error),
-                }
-                c.publish(shell, app);
-            });
-        });
+                    match reply {
+                        Ok(items) => {
+                            c.loaded.insert(thread, key);
+                            if remote_history {
+                                c.lines.clear();
+                                for item in &items {
+                                    c.put_item(item, true);
+                                }
+                            }
+                        }
+                        Err(error) => c.fail_turn(&error),
+                    }
+                    c.publish(shell, app);
+                });
+            }),
+        );
     }
 
     fn delete_chat(&mut self, id: &str) {
-        if let Some(codex) = &self.codex {
-            codex.call("thread/archive", json!({ "threadId": id }), |_| {});
+        if let Some(chat) = self.store.get(id)
+            && let Some(backend) = self.slots.get(chat.backend.as_str()).and_then(|slot| slot.backend.as_ref())
+        {
+            backend.archive(id);
         }
+        self.transcripts.remove(id);
+        self.recorder.forget(id);
         self.store.remove(id);
         self.loaded.remove(id);
         if self.current.as_deref() == Some(id) {
@@ -1096,22 +1274,43 @@ impl Controller {
 pub fn install(app: &App) {
     let dirs = concat_host::AppDirs::locate().ok();
     let store = dirs
+        .as_ref()
         .map(|dirs| Store::open(&dirs.config.join("agent-chats.json")))
         .unwrap_or_else(Store::in_memory);
+    // Where a record is kept for the programs that do not keep their own.
+    let transcripts = Transcripts::in_folder(
+        &dirs
+            .as_ref()
+            .map(|dirs| dirs.config.join("agent-chats"))
+            .unwrap_or_else(|| std::env::temp_dir().join("eloncut-agent-chats")),
+    );
+    // A new conversation is with the program the last one was with.
+    let descriptor = dirs
+        .as_ref()
+        .map(crate::prefs::Preferences::load)
+        .and_then(|prefs| prefs.agent_backend)
+        .and_then(|id| backend::find(&id))
+        .unwrap_or(backend::REGISTRY[0]);
+    let mut slots: HashMap<&'static str, Slot> = backend::REGISTRY
+        .iter()
+        .map(|descriptor| (descriptor.id.0, Slot::default()))
+        .collect();
     let preview = std::env::var("CONCAT_AGENT_STATUS").ok();
-    let controller = Controller {
-        link: match preview.as_deref() {
+    if let Some(slot) = slots.get_mut(descriptor.id.0) {
+        slot.link = match preview.as_deref() {
             Some("missing") => Link::Missing,
             Some("failed") => Link::Failed(String::new()),
-            Some("connecting") => Link::Starting,
-            _ => Link::Starting,
-        },
-        codex: None,
-        models: Vec::new(),
-        defaults: (None, None),
+            _ => Link::Idle,
+        };
+    }
+    let controller = Controller {
+        slots,
+        descriptor,
         model: 0,
         effort: 0,
         store,
+        recorder: Recorder::new(transcripts.clone()),
+        transcripts,
         query: String::new(),
         current: None,
         lines: Vec::new(),
@@ -1153,12 +1352,15 @@ pub fn install(app: &App) {
             let title = title.trim().to_owned();
             if !title.is_empty() {
                 c.store.edit(id.as_str(), |chat| chat.title = title.clone());
-                if let Some(codex) = &c.codex {
-                    codex.call(
-                        "thread/name/set",
-                        json!({ "threadId": id.as_str(), "name": title }),
-                        |_| {},
-                    );
+                // Told to the program the conversation is with, if it keeps names.
+                if let Some(descriptor) = c
+                    .store
+                    .get(id.as_str())
+                    .and_then(|chat| backend::find(&chat.backend))
+                    && descriptor.caps.rename
+                    && let Some(backend) = c.slots.get(descriptor.id.0).and_then(|slot| slot.backend.as_ref())
+                {
+                    backend.rename(id.as_str(), &title);
                 }
             }
             c.publish(shell, app);
@@ -1222,12 +1424,13 @@ pub fn install(app: &App) {
     chat.on_model_changed(|index| {
         with(|c, shell, app| {
             let kept = c.effort_id();
-            c.model = (index.max(0) as usize).min(c.models.len().saturating_sub(1));
+            c.model = (index.max(0) as usize).min(c.slot().models.len().saturating_sub(1));
             let efforts = c.efforts();
             c.effort = kept
                 .and_then(|kept| efforts.iter().position(|known| *known == kept))
                 .or_else(|| {
-                    c.models
+                    c.slot()
+                        .models
                         .get(c.model)
                         .and_then(|model| efforts.iter().position(|e| *e == model.default_effort))
                 })
@@ -1247,9 +1450,30 @@ pub fn install(app: &App) {
             c.publish(shell, app);
         });
     });
-    chat.on_retry(|| with(|c, shell, app| c.begin(shell, app)));
+    chat.on_backend_changed(|index| {
+        with(|c, shell, app| {
+            // Only before the first message: a conversation stays with the
+            // program it began with.
+            if c.current.is_some() || c.busy {
+                return;
+            }
+            let Some(descriptor) = backend::REGISTRY.get(index.max(0) as usize).copied() else {
+                return;
+            };
+            c.enter(descriptor, shell, app);
+            c.publish(shell, app);
+        });
+    });
+    chat.on_retry(|| {
+        with(|c, shell, app| {
+            let descriptor = c.descriptor;
+            c.begin(descriptor, shell, app);
+        });
+    });
     chat.on_open_help(|| {
-        let _ = opener::open("https://developers.openai.com/codex/cli");
+        with(|c, _, _| {
+            let _ = opener::open(c.descriptor.install.url);
+        });
     });
 
     // The project's name in the pane's strip follows the window's: no event
@@ -1274,7 +1498,12 @@ pub fn install(app: &App) {
     // Started once the event loop is running, so that what the worker posts
     // has somewhere to land.
     if preview.is_none() {
-        let _ = slint::invoke_from_event_loop(|| with(|c, shell, app| c.begin(shell, app)));
+        let _ = slint::invoke_from_event_loop(|| {
+            with(|c, shell, app| {
+                let descriptor = c.descriptor;
+                c.begin(descriptor, shell, app);
+            });
+        });
     } else {
         let _ = slint::invoke_from_event_loop(|| with(|c, shell, app| c.publish(shell, app)));
     }
@@ -1285,7 +1514,9 @@ pub fn install(app: &App) {
 pub fn shutdown() {
     CONTROLLER.with(|slot| {
         if let Some(controller) = slot.borrow_mut().as_mut() {
-            controller.codex = None;
+            for slot in controller.slots.values_mut() {
+                slot.backend = None;
+            }
             if let Some(server) = controller.bridge.take() {
                 server.stop_detached();
             }

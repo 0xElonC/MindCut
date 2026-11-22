@@ -7,7 +7,7 @@
 //
 //   - the conversation, which is the messages and the composer under them;
 //   - the welcome, which is the conversation before its first message;
-//   - the status page, for when there is no agent to talk to yet (Codex is
+//   - the status page, for when there is no agent to talk to yet (the program is
 //     not installed, is starting, or has stopped with an error);
 //   - the conversations list, which is where they are found, renamed and
 //     deleted.
@@ -42,11 +42,11 @@ export enum AgentRole {
 /// Whether there is an agent to talk to.
 export enum AgentStatus {
     ready,
-    /// Codex is being started
+    /// the agent's program is being started
     connecting,
-    /// There is no Codex on this machine
+    /// the agent's program is not on this machine
     missing,
-    /// Codex stopped, or would not start
+    /// the agent's program stopped, or would not start
     failed,
 }
 
@@ -118,8 +118,11 @@ export struct AgentSession {
 /// What the pane shows and does, as one list for Rust to publish.
 export global AgentChat {
     in property <AgentStatus> status: AgentStatus.ready;
-    /// The words under the status page's title: why, and what to do.
-    in property <string> status-detail;
+    /// The status page's title, and the words under it: why, and what to do.
+    in property <string> status-title;
+    in property <string> status-body;
+    /// For a program that is not installed: the command that installs it.
+    in property <string> install-hint;
 
     in property <[AgentMessage]> messages;
     in property <[AgentSession]> sessions;
@@ -134,7 +137,18 @@ export global AgentChat {
     /// instead of a copy of its own.
     in-out property <bool> live: true;
 
-    /// The models Codex offers, and which is chosen.
+    /// The agents there are to talk to, and which this conversation is with.
+    /// It is chosen until the first message is sent, and fixed after.
+    in property <[string]> backends;
+    in property <int> backend-index;
+    in property <bool> backend-locked;
+    /// What the chosen agent has: depths of thought to choose between, and
+    /// skills to bring into a message.
+    in property <bool> has-efforts: true;
+    in property <bool> has-skills: true;
+    callback backend-changed(index: int);
+
+    /// The models the agent offers, and which is chosen.
     in property <[string]> models;
     in-out property <int> model-index;
     /// The depths of thought the chosen model takes, and which is chosen.
@@ -149,7 +163,7 @@ export global AgentChat {
     callback send(text: string);
     callback stop();
     callback attach-pick();
-    /// The skills Codex has, for the composer's picker; asked again each
+    /// The skills the agent has, for the composer's picker; asked again each
     /// time the picker opens, since a skill may have been added.
     in property <[AgentSkill]> skills;
     /// The skills chosen for the next message, by name.
@@ -953,21 +967,23 @@ component StatusPage inherits Rectangle {
             }
         }
         Text {
-            text: AgentChat.status == AgentStatus.connecting ? I18n.t("agent.connecting")
-                : AgentChat.status == AgentStatus.missing ? I18n.t("agent.missingTitle")
-                : I18n.t("agent.failedTitle");
+            text: AgentChat.status-title;
             color: Theme.fg;
             font-size: Theme.fs-xl;
             font-weight: Theme.weight-title;
             horizontal-alignment: center;
         }
         Text {
-            text: AgentChat.status-detail != "" ? AgentChat.status-detail
-                : AgentChat.status == AgentStatus.connecting ? I18n.t("agent.connectingBody")
-                : AgentChat.status == AgentStatus.missing ? I18n.t("agent.missingBody")
-                : I18n.t("agent.failedBody");
+            text: AgentChat.status-body;
             color: Theme.fg-muted;
             font-size: Theme.fs;
+            horizontal-alignment: center;
+            wrap: word-wrap;
+        }
+        if AgentChat.install-hint != "": Text {
+            text: AgentChat.install-hint;
+            color: Theme.fg-dim;
+            font-size: Theme.fs-sm;
             horizontal-alignment: center;
             wrap: word-wrap;
         }
@@ -1398,7 +1414,7 @@ component Composer inherits Rectangle {
                     enabled: root.enabled;
                     clicked => { AgentChat.attach-pick(); }
                 }
-                skill-anchor := Rectangle {
+                if AgentChat.has-skills: skill-anchor := Rectangle {
                     width: 28px;
                     height: 28px;
                     IconButton {
@@ -1428,6 +1444,17 @@ component Composer inherits Rectangle {
                         }
                     }
                 }
+                if AgentChat.backends.length > 1: Select {
+                    flat: true;
+                    snug: true;
+                    options: AgentChat.backends;
+                    current: AgentChat.backend-index;
+                    enabled: root.enabled && !AgentChat.backend-locked && !AgentChat.busy;
+                    changed(index) => {
+                        AgentChat.backend-index = index;
+                        AgentChat.backend-changed(index);
+                    }
+                }
                 Select {
                     flat: true;
                     snug: true;
@@ -1439,7 +1466,7 @@ component Composer inherits Rectangle {
                         AgentChat.model-changed(index);
                     }
                 }
-                Select {
+                if AgentChat.has-efforts: Select {
                     flat: true;
                     snug: true;
                     glyph: Glyph.sparkle;

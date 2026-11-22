@@ -1,22 +1,26 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Jareer Abdullah and Concat contributors
 
-//! The `codex app-server` process and its JSON-RPC lines.
+//! A program that speaks JSON-RPC lines, and the plumbing to talk to it.
 //!
 //! One line of JSON each way. A line with an `id` and a `result` or `error`
 //! answers a request this side made; one with a `method` and no `id` is a
-//! notification; one with a `method` and an `id` is a request from Codex
-//! that wants an answer. Codex leaves out the `"jsonrpc"` member, so this
-//! does too.
+//! notification; one with a `method` and an `id` is a request from the
+//! program that wants an answer. Codex leaves out the `"jsonrpc"` member and
+//! ACP agents expect it: [`Spec::jsonrpc`] says which.
 //!
-//! Nothing here blocks the caller except [`Codex::call_blocking`], which is
-//! for a worker thread: the window asks with [`Codex::call`] and is
-//! answered on the reader thread.
+//! Nothing here knows which program it is talking to or what its methods
+//! mean: that is the backend's (`backend/`). Nothing here blocks the caller
+//! except [`Peer::call_blocking`], which is for a worker thread: the window
+//! asks with [`Peer::call`] and is answered on the reader thread.
+//!
+//! A peer is a child process ([`Peer::spawn`]) or any pair of streams
+//! ([`Peer::attach`]), which is how a test stands in for the program.
 
 use std::collections::{HashMap, VecDeque};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
@@ -26,12 +30,12 @@ use serde_json::{Value, json};
 /// What a request came back as: the `result`, or the error's message.
 pub type Reply = Result<Value, String>;
 
-/// What Codex says without being asked.
+/// What the program says without being asked.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Incoming {
     /// An event: a thread started, words arrived, a tool finished.
     Notification { method: String, params: Value },
-    /// A question that waits for [`Codex::respond`].
+    /// A question that waits for [`Writer::respond`].
     Request {
         id: Value,
         method: String,
@@ -70,7 +74,7 @@ pub fn read_line(line: &str) -> Option<Line> {
                 Some(error) => Err(error
                     .get("message")
                     .and_then(Value::as_str)
-                    .unwrap_or("Codex refused the request")
+                    .unwrap_or("The agent refused the request")
                     .to_owned()),
                 None => Ok(object.get("result").cloned().unwrap_or(Value::Null)),
             };
@@ -104,11 +108,11 @@ fn exit_code(child: &Mutex<Child>) -> Option<String> {
     None
 }
 
-/// What the window says when Codex ends: which program, how, and the last
-/// thing it said, so a failure on someone else's computer can be read off
-/// the screen.
-fn stopped_message(program: &str, code: Option<String>, said: &str) -> String {
-    let mut message = String::from("Codex stopped");
+/// What the window says when the program ends: which program, how, and the
+/// last thing it said, so a failure on someone else's computer can be read
+/// off the screen.
+fn stopped_message(name: &str, program: &str, code: Option<String>, said: &str) -> String {
+    let mut message = format!("{name} stopped");
     if let Some(code) = code {
         message.push_str(&format!(" ({code})"));
     }
@@ -143,7 +147,7 @@ pub(crate) fn shim_target(
     Some((node, script))
 }
 
-/// The command that runs Codex with `arguments`.
+/// The command that runs the program with `arguments`.
 fn launcher(program: &Path, arguments: &[&str]) -> Command {
     let mut command = match shim_target(program, |path| path.is_file()) {
         Some((node, script)) => {
@@ -163,11 +167,12 @@ fn launcher(program: &Path, arguments: &[&str]) -> Command {
     command
 }
 
-/// What Codex says when asked to check its configuration, for the message
-/// shown when it ended without saying anything: the usual reason a program
-/// that starts fine by hand stops at once is a file it reads on the way up.
-fn probe(program: &Path) -> String {
-    let mut command = launcher(program, &["app-server", "--print-startup-config"]);
+/// What the program says when asked to check its configuration (`arguments`),
+/// for the message shown when it ended without saying anything: the usual
+/// reason a program that starts fine by hand stops at once is a file it reads
+/// on the way up.
+fn probe(program: &Path, arguments: &[&str]) -> String {
+    let mut command = launcher(program, arguments);
     command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -192,23 +197,92 @@ fn probe(program: &Path) -> String {
     }
 }
 
-/// A running `codex app-server`.
-pub struct Codex {
-    stdin: Arc<Mutex<ChildStdin>>,
-    next: AtomicU64,
-    pending: Arc<Mutex<HashMap<u64, Waiting>>>,
-    child: Arc<Mutex<Child>>,
+/// How to run a program and how it talks.
+#[derive(Debug, Clone, Copy)]
+pub struct Spec {
+    /// What the person calls it, for the messages shown when it stops.
+    pub name: &'static str,
+    /// What follows the program's name on the command line.
+    pub arguments: &'static [&'static str],
+    /// A command line that makes the program check its configuration and say
+    /// what is wrong, for when it stops without a word. Empty for none.
+    pub probe: &'static [&'static str],
+    /// Whether each line carries `"jsonrpc": "2.0"`.
+    pub jsonrpc: bool,
 }
 
-impl Codex {
-    /// Starts the program as an app-server. `on_incoming` is called on the
-    /// reader thread for everything Codex says unasked, and once with
-    /// [`Incoming::Closed`] when the process ends for any reason.
+/// The two ends and the process behind them: what [`Peer::attach`] talks to.
+pub struct Streams {
+    pub input: Box<dyn Write + Send>,
+    pub output: Box<dyn Read + Send>,
+    /// What the program says about itself, if it has a stream for it.
+    pub errors: Option<Box<dyn Read + Send>>,
+    pub child: Option<Child>,
+    /// The program, for the probe when it stops without a word.
+    pub program: Option<PathBuf>,
+}
+
+/// The write side of a [`Peer`]. Cheap to clone, so that the reader thread
+/// can answer what the program asks.
+#[derive(Clone)]
+pub struct Writer {
+    out: Arc<Mutex<Box<dyn Write + Send>>>,
+    jsonrpc: bool,
+    name: &'static str,
+}
+
+impl Writer {
+    fn send(&self, mut message: Value) -> Result<(), String> {
+        if self.jsonrpc {
+            message["jsonrpc"] = json!("2.0");
+        }
+        let mut out = self
+            .out
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        writeln!(out, "{message}")
+            .and_then(|()| out.flush())
+            .map_err(|error| format!("{} could not be written to: {error}", self.name))
+    }
+
+    /// Says something that wants no answer.
+    pub fn notify(&self, method: &str, params: Value) {
+        let message = if params.is_null() {
+            json!({ "method": method })
+        } else {
+            json!({ "method": method, "params": params })
+        };
+        if let Err(error) = self.send(message) {
+            log::warn!("agent: {error}");
+        }
+    }
+
+    /// Answers an [`Incoming::Request`].
+    pub fn respond(&self, id: Value, result: Value) {
+        if let Err(error) = self.send(json!({ "id": id, "result": result })) {
+            log::warn!("agent: {error}");
+        }
+    }
+}
+
+/// A running program that speaks JSON-RPC lines.
+pub struct Peer {
+    writer: Writer,
+    next: AtomicU64,
+    pending: Arc<Mutex<HashMap<u64, Waiting>>>,
+    child: Option<Arc<Mutex<Child>>>,
+}
+
+impl Peer {
+    /// Starts `program` as described by `spec`. `on_incoming` is called on
+    /// the reader thread for everything the program says unasked, and once
+    /// with [`Incoming::Closed`] when the process ends for any reason.
     pub fn spawn(
         program: &Path,
-        on_incoming: impl Fn(Incoming) + Send + 'static,
-    ) -> Result<Codex, String> {
-        let mut command = launcher(program, &["app-server"]);
+        spec: Spec,
+        on_incoming: impl Fn(Incoming, &Writer) + Send + 'static,
+    ) -> Result<Peer, String> {
+        let mut command = launcher(program, spec.arguments);
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -216,33 +290,68 @@ impl Codex {
         let mut child = command
             .spawn()
             .map_err(|error| format!("{} could not be started: {error}", program.display()))?;
-        let stdin = child.stdin.take().ok_or("Codex has no input")?;
-        let stdout = child.stdout.take().ok_or("Codex has no output")?;
-        let stderr = child.stderr.take().ok_or("Codex has no error stream")?;
+        let input = child
+            .stdin
+            .take()
+            .ok_or_else(|| format!("{} has no input", spec.name))?;
+        let output = child
+            .stdout
+            .take()
+            .ok_or_else(|| format!("{} has no output", spec.name))?;
+        let errors = child
+            .stderr
+            .take()
+            .ok_or_else(|| format!("{} has no error stream", spec.name))?;
+        Ok(Peer::attach(
+            Streams {
+                input: Box::new(input),
+                output: Box::new(output),
+                errors: Some(Box::new(errors)),
+                child: Some(child),
+                program: Some(program.to_owned()),
+            },
+            spec,
+            on_incoming,
+        ))
+    }
 
+    /// Talks over `streams`, which is a process's or anything else's.
+    pub fn attach(
+        streams: Streams,
+        spec: Spec,
+        on_incoming: impl Fn(Incoming, &Writer) + Send + 'static,
+    ) -> Peer {
         let pending: Arc<Mutex<HashMap<u64, Waiting>>> = Arc::new(Mutex::new(HashMap::new()));
         let tail: Arc<Mutex<VecDeque<String>>> = Arc::new(Mutex::new(VecDeque::new()));
+        let writer = Writer {
+            out: Arc::new(Mutex::new(streams.input)),
+            jsonrpc: spec.jsonrpc,
+            name: spec.name,
+        };
 
         let keep = Arc::clone(&tail);
-        let error_reader = std::thread::spawn(move || {
-            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-                log::debug!("agent: codex says: {line}");
-                let mut keep = keep.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-                if keep.len() == 12 {
-                    keep.pop_front();
+        let error_reader = streams.errors.map(|errors| {
+            std::thread::spawn(move || {
+                for line in BufReader::new(errors).lines().map_while(Result::ok) {
+                    log::debug!("agent: it says: {line}");
+                    let mut keep = keep.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                    if keep.len() == 12 {
+                        keep.pop_front();
+                    }
+                    keep.push_back(line);
                 }
-                keep.push_back(line);
-            }
+            })
         });
 
         let waiting = Arc::clone(&pending);
         let lines = Arc::clone(&tail);
-        let program_path = program.to_owned();
-        let process = Arc::new(Mutex::new(child));
-        let watched = Arc::clone(&process);
-        let program_name = program.display().to_string();
+        let program_path = streams.program;
+        let process = streams.child.map(|child| Arc::new(Mutex::new(child)));
+        let watched = process.clone();
+        let answering = writer.clone();
+        let output = streams.output;
         std::thread::spawn(move || {
-            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            for line in BufReader::new(output).lines().map_while(Result::ok) {
                 match read_line(&line) {
                     Some(Line::Response { id, reply }) => {
                         let waiter = waiting
@@ -253,7 +362,7 @@ impl Codex {
                             waiter(reply);
                         }
                     }
-                    Some(Line::Incoming(incoming)) => on_incoming(incoming),
+                    Some(Line::Incoming(incoming)) => on_incoming(incoming, &answering),
                     None => {
                         log::debug!("agent: a line that is not protocol: {line}");
                         let mut keep = lines.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -268,8 +377,10 @@ impl Codex {
             // The error stream is read on its own thread and may not have
             // finished with the last of what it said: wait for it, or the
             // reason the program gave is lost and "stopped" is all there is.
-            let _ = error_reader.join();
-            let code = exit_code(&watched);
+            if let Some(reader) = error_reader {
+                let _ = reader.join();
+            }
+            let code = watched.as_deref().and_then(exit_code);
             let said = tail
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -278,8 +389,15 @@ impl Codex {
                 .find(|line| !line.trim().is_empty())
                 .cloned()
                 .unwrap_or_default();
-            let said = if said.is_empty() { probe(&program_path) } else { said };
-            let stopped = stopped_message(&program_name, code, &said);
+            let said = match (&program_path, said.is_empty(), spec.probe.is_empty()) {
+                (Some(program), true, false) => probe(program, spec.probe),
+                _ => said,
+            };
+            let program_name = program_path
+                .as_deref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| spec.name.to_owned());
+            let stopped = stopped_message(spec.name, &program_name, code, &said);
             let waiters: Vec<Waiting> = waiting
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -289,25 +407,20 @@ impl Codex {
             for waiter in waiters {
                 waiter(Err(stopped.clone()));
             }
-            on_incoming(Incoming::Closed(stopped));
+            on_incoming(Incoming::Closed(stopped), &answering);
         });
 
-        Ok(Codex {
-            stdin: Arc::new(Mutex::new(stdin)),
+        Peer {
+            writer,
             next: AtomicU64::new(1),
             pending,
             child: process,
-        })
+        }
     }
 
-    fn write(&self, message: &Value) -> Result<(), String> {
-        let mut stdin = self
-            .stdin
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        writeln!(stdin, "{message}")
-            .and_then(|()| stdin.flush())
-            .map_err(|error| format!("Codex could not be written to: {error}"))
+    /// The write side, to hand to whatever answers the program's questions.
+    pub fn writer(&self) -> Writer {
+        self.writer.clone()
     }
 
     /// Asks `method`; `then` is called with the answer on the reader thread,
@@ -323,7 +436,10 @@ impl Codex {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert(id, Box::new(then));
-        if let Err(error) = self.write(&json!({ "id": id, "method": method, "params": params })) {
+        if let Err(error) = self
+            .writer
+            .send(json!({ "id": id, "method": method, "params": params }))
+        {
             let waiter = self
                 .pending
                 .lock()
@@ -335,7 +451,7 @@ impl Codex {
         }
     }
 
-    /// [`Codex::call`], waited for. For a worker thread, never the window's.
+    /// [`Peer::call`], waited for. For a worker thread, never the window's.
     pub fn call_blocking(&self, method: &str, params: Value, patience: Duration) -> Reply {
         let (send, receive) = mpsc::channel();
         self.call(method, params, move |reply| {
@@ -343,47 +459,23 @@ impl Codex {
         });
         receive
             .recv_timeout(patience)
-            .unwrap_or_else(|_| Err(format!("Codex did not answer {method} in time")))
+            .unwrap_or_else(|_| Err(format!("The agent did not answer {method} in time")))
     }
 
     /// Says something that wants no answer.
     pub fn notify(&self, method: &str, params: Value) {
-        let message = if params.is_null() {
-            json!({ "method": method })
-        } else {
-            json!({ "method": method, "params": params })
-        };
-        if let Err(error) = self.write(&message) {
-            log::warn!("agent: {error}");
-        }
+        self.writer.notify(method, params);
     }
 
-    /// Answers a [`Incoming::Request`].
+    /// Answers an [`Incoming::Request`].
     pub fn respond(&self, id: Value, result: Value) {
-        if let Err(error) = self.write(&json!({ "id": id, "result": result })) {
-            log::warn!("agent: {error}");
-        }
+        self.writer.respond(id, result);
     }
 
-    /// The opening exchange: who is asking, then the word that says the
-    /// asking may begin. The reply says where Codex keeps its home.
-    pub fn handshake(&self, name: &str, title: &str, version: &str) -> Reply {
-        let reply = self.call_blocking(
-            "initialize",
-            json!({
-                "clientInfo": { "name": name, "title": title, "version": version },
-                "capabilities": { "experimentalApi": true },
-            }),
-            Duration::from_secs(20),
-        )?;
-        self.notify("initialized", Value::Null);
-        Ok(reply)
-    }
-
-    /// Ends the process.
+    /// Ends the process, when there is one.
     pub fn kill(&self) {
-        let mut child = self
-            .child
+        let Some(child) = &self.child else { return };
+        let mut child = child
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let _ = child.kill();
@@ -391,7 +483,7 @@ impl Codex {
     }
 }
 
-impl Drop for Codex {
+impl Drop for Peer {
     fn drop(&mut self) {
         self.kill();
     }
@@ -462,9 +554,16 @@ mod tests {
         assert_eq!(read_line("{}"), None);
     }
 
+    const SPEC: Spec = Spec {
+        name: "Test",
+        arguments: &[],
+        probe: &[],
+        jsonrpc: false,
+    };
+
     #[test]
     fn a_program_that_is_not_there_says_so() {
-        let error = Codex::spawn(Path::new("/no/such/codex"), |_| {})
+        let error = Peer::spawn(Path::new("/no/such/codex"), SPEC, |_, _| {})
             .err()
             .expect("cannot start");
         assert!(error.contains("could not be started"), "{error}");
@@ -476,7 +575,7 @@ mod tests {
         // `true` exits at once: the question in flight is answered with the
         // stop, and the close is reported.
         let (closed, heard) = mpsc::channel();
-        let codex = Codex::spawn(Path::new("/usr/bin/true"), move |incoming| {
+        let codex = Peer::spawn(Path::new("/usr/bin/true"), SPEC, move |incoming, _| {
             if let Incoming::Closed(_) = incoming {
                 let _ = closed.send(());
             }
