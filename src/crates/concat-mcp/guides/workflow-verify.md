@@ -22,13 +22,13 @@ If frames fail, record the failure and summarize only what the state proves. If 
 ## What you cannot do
 
 Timeline state and sampled stills do not verify audible words, motion or
-continuous playback. Automatic transcription is unavailable through MCP.
-There is no dedicated MCP tool for voice isolation, but `edit_apply` with
-`setClipVoice` sets a clip's `speech` or `vocals` mix (see the index for an
-example). Reading it back does not verify model availability, rendered
-separation, or how it sounds. Ask the user to play the affected interval in
-the app if confirmation is needed. Tell the user what could not be verified;
-do not fabricate evidence. See the index for other unavailable features.
+continuous playback. A saved transcript from `transcript_query` can help
+check caption text and source timings, but does not prove what the edited
+timeline plays. For singing separation, check `export_status` after
+`audio_separate_vocals`, then confirm the clip mix with `project_get`.
+Neither check proves how the mix sounds. Ask the user to play the affected
+interval in the app if confirmation is needed. Tell the user what could not
+be verified; do not fabricate evidence.
 
 In the source repository, the preserved license is in
 [docs/chatcut-skill-trial/LICENSE](../../../../docs/chatcut-skill-trial/LICENSE).

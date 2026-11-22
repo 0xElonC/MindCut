@@ -64,12 +64,24 @@ Tools are named for what they do. Editing tools derive their argument schemas fr
 | Keyframes and effects | `keyframe_set`, `keyframe_clear`, `effects_list`, `effect_layer_add`, `effect_key_set` |
 | Anything else | `edit_apply` (any edit command, or a batch of them as one undo step), `edit_undo`, `edit_redo` |
 | Templates | `template_list`, `template_instantiate` |
-| Export | `export_start`, `export_status`, `export_wait` (with progress), `export_cancel` |
+| Local AI status | `ai_status` (model installation and activity) |
+| Transcription | `media_transcribe`, `transcript_query` (text and word timings in source seconds) |
+| Speech generation | `speech_voices`, `speech_generate` (local WAV imported into the bin) |
+| Vocal separation | `audio_separate_vocals` (creates the cache before `edit_apply` with `setClipVoice`) |
+| Picture enhancement | `clip_enhance` (replaces the clip source after an enhanced cache copy succeeds) |
+| Export and job control | `export_start`, `export_status`, `export_wait` (export progress), `export_cancel` |
 | Looking | `preview_frame` (the composited frame as an image) |
 
 Edits stay in memory until `project_save`, as in the window. Times are seconds; a keyframe's position is a fraction of its clip (0 to 1); sizes and offsets are fractions of the frame.
 
 Before editing, read the manual directory with `guide_read`, then read the relevant topics. The manual is embedded in the MCP binary at compile time and returned as text in both window and headless modes; no skill files are installed in your home folder or project.
+
+For local AI workflows, call `guide_read` with `{"topic":"ai-tools"}`. Check
+`ai_status` first, then poll background jobs with `export_status` and use their
+results once the state is `done`. The tools never download models. Install
+missing models in Settings > Transcriber or Settings > Speech, or use Voice
+Isolation > Song (Spleeter) or Enhance > Preview (Real-ESRGAN) in the clip
+inspector.
 
 ## Protocol
 

@@ -13,6 +13,10 @@ only the pages relevant to the requested edit.
 | Effects (效果) | `effects_list`, `clip_update`, `effect_layer_add` | effects-filters-transitions |
 | Filters (滤镜) | `effects_list`, `clip_update`, `effect_layer_add` | effects-filters-transitions |
 | Adjust (调节) | `effects_list`, `effect_layer_add` with `concat.adjust` | effects-filters-transitions |
+| Settings > Transcriber (转写) | `ai_status`, `media_transcribe`, `transcript_query`, `captions_add` | ai-tools |
+| Settings > Speech (语音) | `ai_status`, `speech_voices`, `speech_generate`, `clip_add` | ai-tools |
+| Clip inspector > Voice Isolation (人声分离) | `audio_separate_vocals`, then `edit_apply` with `setClipVoice` | ai-tools |
+| Clip inspector > Enhance (画质增强) | `clip_enhance`, `export_status`, `export_cancel` | ai-tools |
 | Templates (模板) | `template_list`, `template_instantiate` | templates-export |
 
 For animation and masking, read keyframes-masks. For a vertical short from
@@ -36,9 +40,10 @@ workflow-verify and templates-export as needed.
 
 ## Set a clip's voice isolation mix
 
-There is no dedicated MCP tool for voice isolation. Use `edit_apply` with
-`setClipVoice` on a clip with an audio track. For example, to request speech
-at gain 1 and the background at gain 0:
+For singing, run `audio_separate_vocals` and wait for `export_status` to
+report `done` before setting the `vocals` mix. For dialogue, use `setClipVoice`
+with `speech`. Both mixes are set through `edit_apply`. For example, to
+request speech at gain 1 and background at gain 0:
 
 ```json
 {
@@ -59,10 +64,15 @@ It does not verify that the required model is installed or available, that
 separation rendered, or how it sounds. If separation matters, ask the user to
 play the affected interval in the app and confirm the result.
 
-## What you cannot do
+## Local AI and its limits
 
-The MCP tools do not provide automatic transcription, speech generation,
-image quality enhancement, a sound library, asset library organization,
-or invoking editor preset cards by name. Tell the user which capability is
-unavailable. Ask for local media, genuine caption text or timings, or explicit
-style settings as appropriate. Never fabricate inputs or claim work you did not do.
+Read ai-tools for the workflow. Check `ai_status` first, then poll each job
+with `export_status` before using its result. If a model is missing, the
+user installs it in Settings > Transcriber or Settings > Speech for those
+features. For Spleeter, select Voice Isolation > Song in the clip inspector;
+for Real-ESRGAN, turn on Enhance there and click Preview. The Agent cannot
+download these models.
+
+MCP does not provide a sound library, asset library organization or invoking
+editor preset cards by name. Ask for local media or explicit style settings
+as needed. Report unavailable capabilities and do not invent inputs.

@@ -21,9 +21,9 @@ Adapted for MindCut from ChatCut-Inc's [Kimi Work Editing Guide](https://github.
 
 ## What you cannot do
 
-If only a URL is available, ask for a legitimately downloaded local file. If timestamps, transcript, or beat markers are not available, ask for picks/timecodes or use whole shots where their purpose is known. Do not claim automatic transcribing, stock search, subject tracking, beat alignment or motion/audio review.
+If only a URL is available, ask for a legitimately downloaded local file. For dialogue picks, `media_transcribe` and `transcript_query` can supply source timings (see ai-tools). If timestamps or beat markers are unavailable, ask for picks/timecodes or use whole shots where their purpose is known. Do not claim stock search, subject tracking, beat alignment or motion/audio review.
 
-MCP also does not generate footage or speech, provide a sound library, or
+MCP also does not generate footage, provide a sound library, or
 organize an asset library. Tell the user when an input or capability is
 missing. See the index for other unavailable features.
 

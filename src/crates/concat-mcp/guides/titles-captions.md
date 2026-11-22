@@ -25,10 +25,15 @@ Add titles, style selected characters and place captions from supplied text and 
 Read ids and `textRuns` with `timeline_read`. Check legibility over the actual
 footage with `preview_frame`, including around caption boundaries.
 
+## From source audio to captions
+
+Use `media_transcribe`, wait for the job, then read word timings with
+`transcript_query`. Convert source seconds to timeline seconds before calling
+`captions_add`. For new narration, use `speech_generate` and place the result
+with `clip_add`. See ai-tools for model setup and timing examples. If real
+words or timings are missing, ask the user; never invent them.
+
 ## What you cannot do
 
 Title preset cards cannot be invoked by name. Ask for the look and set font,
-size, color and weight explicitly. There is no automatic transcription or
-speech generation through MCP. Ask for the actual caption text and timeline
-timecodes where missing; never invent spoken words or their timing. See the
-index for other unavailable features.
+size, color and weight explicitly.

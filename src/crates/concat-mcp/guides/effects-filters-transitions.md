@@ -22,15 +22,16 @@ Read back the affected span with `timeline_read`. Use `preview_frame` before,
 within and after the effect where useful. For a sound layer or a transition
 whose motion matters, report whether actual playback was checked.
 
+## Local enhancement and vocals
+
+Use `clip_enhance` for a dedicated picture enhancement job. Use
+`audio_separate_vocals` before setting a clip's `vocals` mix with `edit_apply`
+and `setClipVoice`. For dialogue, use the separate `speech` mix. See ai-tools
+for model setup and job polling. Check playback in the app if the audible
+result matters.
+
 ## What you cannot do
 
 You cannot invoke uncatalogued effects or choose an editor preset card by its
-display name. An audio effect does not generate speech.
-Color and sharpness adjustments are not a dedicated image enhancement workflow.
-Tell the user when the requested operation is unavailable; see the index.
-
-Voice isolation is a clip mix, separate from the audio effect chain. There
-is no dedicated MCP tool; use `edit_apply` with `setClipVoice` and `speech`
-or `vocals` (see the index). Setting the mix does not verify model availability,
-rendered separation, or how it sounds. Ask the user to check playback in the
-app when separation matters.
+display name. Audio effects do not generate speech; use `speech_generate` for
+narration. See the index for other limits.

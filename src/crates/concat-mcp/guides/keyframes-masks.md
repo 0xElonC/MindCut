@@ -36,8 +36,5 @@ Describe which positions were inspected; stills cannot prove smooth playback.
 These tools do not track a subject automatically or animate arbitrary
 properties. Use manually chosen positions or ask the user for reference times.
 
-There is no dedicated MCP tool for voice isolation. To set a clip's `speech`
-or `vocals` mix, use `edit_apply` with `setClipVoice` (see the index). The
-setting does not verify model availability, rendered separation, or how it
-sounds. Ask the user to check playback in the app when separation matters.
-See the index for other unavailable features.
+For singing separation and clip voice mixes, see ai-tools. `audio_separate_vocals`
+creates the cache before `edit_apply` with `setClipVoice` sets the mix.
