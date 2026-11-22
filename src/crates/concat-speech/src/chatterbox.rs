@@ -426,12 +426,6 @@ impl Engine {
                     (SAMPLE_RATE as f32 * GAP_SECONDS) as usize,
                 ));
             }
-            log::debug!(
-                "chatterbox: chunk {}/{}: {:?}",
-                index + 1,
-                chunks.len(),
-                chunk.chars().take(80).collect::<String>()
-            );
             let writing = std::time::Instant::now();
             let tokens = self.write(chunk, &voice, cancel, &mut |count| {
                 progress(((written + count) as f32 / expected.max(1) as f32).min(0.95));

@@ -765,11 +765,12 @@ impl Controller {
     /// of its own that this process serves.
     fn mcp(&mut self, shell: &Shell) -> Result<McpServer, String> {
         if self.bridge.is_none() {
-            let (exporter, transcriber, open_projects, dirs) = {
+            let (exporter, transcriber, speech, open_projects, dirs) = {
                 let studio = shell.studio.borrow();
                 (
                     studio.host.exporter.clone(),
                     Arc::clone(&studio.host.transcriber),
+                    Arc::clone(&studio.host.speech),
                     studio.host.open_projects.clone(),
                     studio.host.dirs.clone(),
                 )
@@ -783,6 +784,7 @@ impl Controller {
                 let mut api = concat_api::Api::with_dirs(dirs, events);
                 api.share_exporter(exporter);
                 api.share_transcriber(transcriber);
+                api.share_speech(speech);
                 api.share_open_projects(open_projects);
                 api.set_live(Arc::new(crate::live::WindowLive { on: live }));
                 Ok(api)

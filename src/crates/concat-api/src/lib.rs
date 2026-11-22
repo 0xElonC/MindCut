@@ -35,6 +35,7 @@ pub mod message;
 #[cfg(test)]
 mod project_close_tests;
 pub mod rpc;
+mod speech;
 mod transcription;
 
 use std::collections::BTreeMap;
@@ -248,6 +249,13 @@ pub trait Live: Send + Sync {
     /// Applies an edit as the window's own, and answers with the state
     /// after it.
     fn apply(&self, command: Command) -> Result<EditorView, String>;
+    /// Applies a background job's edit only while the named project is still open.
+    fn apply_to(&self, path: &str, command: Command) -> Result<EditorView, String> {
+        if self.path().is_none_or(|open| key_of(&open) != key_of(path)) {
+            return Err("the target project is no longer open in the window".to_owned());
+        }
+        self.apply(command)
+    }
     /// The window's Undo.
     fn undo(&self) -> Result<EditorView, String>;
     /// The window's Redo.
@@ -274,6 +282,8 @@ pub struct Api {
     monitor: Monitor,
     exporter: Exporter,
     transcriber: Arc<concat_speech::Transcriber>,
+    speech: Arc<concat_speech::Speech>,
+    speech_jobs: Vec<speech::Pending>,
     events: EventSink,
     jobs: Jobs,
     /// Every job's last known state and each running one's stop flag, fed
@@ -336,6 +346,8 @@ impl Api {
             monitor: Monitor::new(),
             exporter: Exporter::new(),
             transcriber: Arc::new(concat_speech::Transcriber::new()),
+            speech: Arc::new(concat_speech::Speech::new()),
+            speech_jobs: Vec::new(),
             sessions: BTreeMap::new(),
             roots: Vec::new(),
             open: OpenProjects::default(),
@@ -393,6 +405,7 @@ impl Api {
 
     /// [`Request::ExportStatus`].
     pub fn job_status(&mut self, job: &str) -> Result<JobStatus, ApiError> {
+        self.reap_speech(false);
         self.jobs.reap(&self.book);
         self.book.status(job).ok_or_else(|| {
             ApiError::new(
@@ -416,6 +429,11 @@ impl Api {
     /// Shares the active window's transcription engine and job slot.
     pub fn share_transcriber(&mut self, transcriber: Arc<concat_speech::Transcriber>) {
         self.transcriber = transcriber;
+    }
+
+    /// Shares the window's speech engine and its synthesis slot.
+    pub fn share_speech(&mut self, speech: Arc<concat_speech::Speech>) {
+        self.speech = speech;
     }
 
     /// Takes an embedder's register of open projects in place of its own,
@@ -480,19 +498,22 @@ impl Api {
 
     /// How many jobs are still running.
     pub fn running(&mut self) -> usize {
+        self.reap_speech(false);
         self.jobs.reap(&self.book);
-        self.jobs.threads.len()
+        self.jobs.threads.len() + self.speech_jobs.len()
     }
 
     /// Waits for every running job to end. A transport calls this before
     /// it exits, so an export begun on its last line still finishes.
     pub fn finish(&mut self) {
         self.jobs.finish();
+        self.reap_speech(true);
     }
 
     /// Runs one request. The response is what the request is worth; a job
     /// it begins reports through the sink from then on.
     pub fn dispatch(&mut self, request: Request) -> Response {
+        self.reap_speech(false);
         self.jobs.reap(&self.book);
         self.run(request).into()
     }
@@ -528,6 +549,10 @@ impl Api {
         match request {
             Request::Version => Ok(Reply::Version(self.version())),
             Request::AiStatus => Ok(Reply::AiStatus(self.ai_status())),
+            Request::SpeechVoices => Ok(Reply::Voices(self.speech_voices())),
+            Request::SpeechGenerate { path, text, voice_id, speed } => {
+                Ok(Reply::Started(self.generate_speech(&path, text, voice_id, speed)?))
+            }
             Request::MediaTranscribe {
                 path,
                 media_id,
@@ -907,6 +932,9 @@ impl Api {
 
     /// [`Request::ExportCancel`].
     pub fn cancel(&mut self, job: &str) -> Result<(), ApiError> {
+        if self.speech_jobs.iter().any(|pending| pending.id() == job) && self.book.cancel(job) {
+            return Ok(());
+        }
         self.jobs.reap(&self.book);
         if !self.jobs.threads.iter().any(|(name, _)| name == job) {
             return Err(ApiError::new(

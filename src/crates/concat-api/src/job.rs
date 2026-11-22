@@ -65,9 +65,24 @@ impl Book {
         match event {
             Event::TranscriptProgress {
                 stage, fraction, ..
+            }
+            | Event::SpeechProgress {
+                stage, fraction, ..
             } => {
                 status.stage = Some(stage.clone());
                 status.fraction = f64::from(*fraction).clamp(0.0, 1.0);
+            }
+            Event::SpeechDone {
+                output,
+                media_id,
+                duration,
+                ..
+            } => {
+                status.state = JobState::Done;
+                status.output = output.clone();
+                status.media_id = Some(media_id.clone());
+                status.duration = Some(*duration);
+                status.fraction = 1.0;
             }
             Event::TranscriptDone { output, .. } => {
                 status.state = JobState::Done;
@@ -113,7 +128,9 @@ impl Book {
                 status.frame = status.total;
                 status.fraction = 1.0;
             }
-            Event::ExportFailed { error, .. } | Event::TranscriptFailed { error, .. } => {
+            Event::ExportFailed { error, .. }
+            | Event::TranscriptFailed { error, .. }
+            | Event::SpeechFailed { error, .. } => {
                 status.state = if error.code == ErrorCode::Cancelled {
                     JobState::Cancelled
                 } else {

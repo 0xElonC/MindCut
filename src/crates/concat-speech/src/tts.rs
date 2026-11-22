@@ -30,7 +30,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use concat_host::{AppDirs, SingleFlight, projects};
+use concat_host::{AppDirs, Job, SingleFlight, projects};
 use serde::{Deserialize, Serialize};
 
 use crate::{DownloadProgress, JobStage};
@@ -64,17 +64,39 @@ pub fn family_of(id: &str) -> Family {
 /// own, and returns once the file is written. Android's, set at start.
 pub type SystemVoice = dyn Fn(&str, &Path, f32) -> Result<(), String> + Send + Sync;
 
-static SYSTEM_VOICE: OnceLock<Box<SystemVoice>> = OnceLock::new();
+struct PlatformVoice {
+    speak: Box<SystemVoice>,
+    offline: bool,
+}
+
+static SYSTEM_VOICE: OnceLock<PlatformVoice> = OnceLock::new();
 
 /// Hands the phone's voice over. The first call wins; later ones are
 /// ignored.
 pub fn set_system_voice(voice: Box<SystemVoice>) {
-    let _ = SYSTEM_VOICE.set(voice);
+    let _ = SYSTEM_VOICE.set(PlatformVoice {
+        speak: voice,
+        offline: false,
+    });
+}
+
+/// Registers a platform engine that guarantees speech is generated offline.
+/// Like [`set_system_voice`], this must be called before any other registration.
+pub fn set_offline_system_voice(voice: Box<SystemVoice>) {
+    let _ = SYSTEM_VOICE.set(PlatformVoice {
+        speak: voice,
+        offline: true,
+    });
+}
+
+/// Whether a platform voice is registered and guaranteed to work offline.
+pub fn has_offline_system_voice() -> bool {
+    SYSTEM_VOICE.get().is_some_and(|voice| voice.offline)
 }
 
 /// Whether this build has a phone's voice to offer.
 fn system_voice() -> Option<&'static SystemVoice> {
-    SYSTEM_VOICE.get().map(Box::as_ref)
+    SYSTEM_VOICE.get().map(|voice| voice.speak.as_ref())
 }
 
 /// The most the phone's engine reads in one go: Android's
@@ -213,7 +235,8 @@ fn model_downloaded(dirs: &AppDirs, id: &str) -> bool {
         Family::System => system_voice().is_some(),
         #[cfg(feature = "chatterbox")]
         Family::Chatterbox => {
-            model_dir(dirs, id).is_ok_and(|dir| crate::chatterbox::installed(&dir))
+            known(id).is_some()
+                && crate::chatterbox::installed(&dirs.data.join("tts-models").join(id))
         }
         #[cfg(not(feature = "chatterbox"))]
         Family::Chatterbox => {
@@ -416,6 +439,37 @@ fn read_or_on_cpu<E, T>(
     }
 }
 
+/// A stock synthesis reserved for a background API job.
+pub struct StockRun {
+    speech: Arc<Speech>,
+    job: Job,
+}
+
+impl StockRun {
+    /// This run's cancellation flag.
+    pub fn cancel_handle(&self) -> Arc<std::sync::atomic::AtomicBool> {
+        self.job.cancel_handle()
+    }
+
+    /// Generates a WAV at the selected project-local path, without downloading.
+    pub fn speak(
+        &self,
+        dirs: &AppDirs,
+        request: &SpeakRequest,
+        target: &Path,
+        progress: impl FnMut(JobStage) + Send + 'static,
+    ) -> Result<SpeakResult, String> {
+        if is_clone(request.voice) || request.reference.is_some() {
+            return Err("cloned voices are unavailable to automation".to_owned());
+        }
+        if family_of(&request.model_id) == Family::System && !has_offline_system_voice() {
+            return Err("the platform voice is not available offline".to_owned());
+        }
+        self.speech
+            .speak_in_slot(dirs, request, &self.job, Some(target), progress)
+    }
+}
+
 /// The one synthesis and the one download that can run at a time, plus the
 /// loaded engine.
 ///
@@ -458,7 +512,16 @@ impl Speech {
     /// Models and voices, for the settings panel and the speech dialog.
     pub fn status(dirs: &AppDirs) -> Result<TtsStatus, String> {
         let dir = models_dir(dirs)?;
-        Ok(TtsStatus {
+        Ok(Self::inspect(dirs, &dir))
+    }
+
+    /// Reads the same installation state as Settings without creating a directory.
+    pub fn status_read_only(dirs: &AppDirs) -> TtsStatus {
+        Self::inspect(dirs, &dirs.data.join("tts-models"))
+    }
+
+    fn inspect(dirs: &AppDirs, dir: &Path) -> TtsStatus {
+        TtsStatus {
             models_dir: dir.to_string_lossy().into_owned(),
             models: KNOWN_MODELS
                 .iter()
@@ -497,7 +560,7 @@ impl Speech {
                         }),
                 )
                 .collect(),
-        })
+        }
     }
 
     /// Downloads model `id` from Concat's mirror. Blocks for the whole
@@ -577,10 +640,37 @@ impl Speech {
         &self,
         dirs: &AppDirs,
         request: &SpeakRequest,
-        mut progress: impl FnMut(JobStage) + Send + 'static,
+        progress: impl FnMut(JobStage) + Send + 'static,
     ) -> Result<SpeakResult, String> {
         let job = self.gate.begin("speech generation")?;
+        self.speak_in_slot(dirs, request, &job, None, progress)
+    }
+
+    /// Reserves the same synthesis slot the window uses, before a worker starts.
+    pub fn begin_stock(self: &Arc<Self>) -> Result<StockRun, String> {
+        Ok(StockRun {
+            speech: Arc::clone(self),
+            job: self.gate.begin("speech generation")?,
+        })
+    }
+
+    /// Whether Settings is currently downloading a voice model.
+    pub fn is_downloading(&self) -> bool {
+        self.downloads.is_busy()
+    }
+
+    fn speak_in_slot(
+        &self,
+        dirs: &AppDirs,
+        request: &SpeakRequest,
+        job: &Job,
+        target: Option<&Path>,
+        mut progress: impl FnMut(JobStage) + Send + 'static,
+    ) -> Result<SpeakResult, String> {
         let cancel = job.cancel_handle();
+        if job.cancelled() {
+            return Err("speech generation cancelled".to_owned());
+        }
         let started = std::time::Instant::now();
 
         let text = request.text.trim();
@@ -620,7 +710,12 @@ impl Speech {
             1.0
         };
 
-        let dir = model_dir(dirs, &request.model_id)?;
+        let dir = if target.is_some() {
+            known(&request.model_id).ok_or("unknown voice model")?;
+            dirs.data.join("tts-models").join(&request.model_id)
+        } else {
+            model_dir(dirs, &request.model_id)?
+        };
         if !model_downloaded(dirs, &request.model_id) {
             return Err(format!(
                 "model {} is not downloaded - see Settings > Speech",
@@ -635,18 +730,21 @@ impl Speech {
         if !projects::is_project(root) {
             return Err(format!("{} is not a project folder", request.project));
         }
-        let out_dir = root.join("audio");
-        std::fs::create_dir_all(&out_dir)
-            .map_err(|error| format!("could not create {}: {error}", out_dir.display()))?;
-
-        // Wall-clock millis plus process id: unique enough for files created
-        // by one human clicking a button, and stable for the media bin name.
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|elapsed| elapsed.as_millis())
-            .unwrap_or(0);
-        let voice_name = voice_name(request.voice).unwrap_or("voice");
-        let file = out_dir.join(format!("speech-{voice_name}-{stamp}.wav"));
+        let file = if let Some(file) = target {
+            file.to_path_buf()
+        } else {
+            let out_dir = root.join("audio");
+            std::fs::create_dir_all(&out_dir)
+                .map_err(|error| format!("could not create {}: {error}", out_dir.display()))?;
+            // Wall-clock millis plus process id: unique enough for files created
+            // by one human clicking a button, and stable for the media bin name.
+            let stamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_millis())
+                .unwrap_or(0);
+            let voice_name = voice_name(request.voice).unwrap_or("voice");
+            out_dir.join(format!("speech-{voice_name}-{stamp}.wav"))
+        };
 
         if family == Family::System {
             let voice = system_voice().ok_or("this device has no voice of its own")?;
@@ -669,7 +767,6 @@ impl Speech {
         }
         #[cfg(feature = "chatterbox")]
         {
-            let _ = speed;
             let mut engine = self
                 .engine
                 .lock()
@@ -773,7 +870,13 @@ impl Speech {
             let rate = crate::chatterbox::SAMPLE_RATE;
             std::fs::write(&file, wav_bytes(&spoken, rate))
                 .map_err(|error| format!("could not write {}: {error}", file.display()))?;
-            let duration = spoken.len() as f64 / f64::from(rate);
+            // The sheet keeps the stock model's natural pace. The API's
+            // explicit rate uses a pitch-preserving time stretch.
+            let duration = if target.is_some() && speed != 1.0 {
+                stretch_wav(&file, rate, speed, &cancel)?
+            } else {
+                spoken.len() as f64 / f64::from(rate)
+            };
             log::info!(
                 "tts: wrote {} ({duration:.2}s) in {:.1}s",
                 file.display(),
@@ -929,6 +1032,40 @@ pub(crate) fn wav_bytes(samples: &[f32], rate: u32) -> Vec<u8> {
         out.extend_from_slice(&value.to_le_bytes());
     }
     out
+}
+
+#[cfg(feature = "chatterbox")]
+fn stretch_wav(
+    file: &Path,
+    rate: u32,
+    speed: f32,
+    cancel: &std::sync::atomic::AtomicBool,
+) -> Result<f64, String> {
+    let options = concat_media::AudioOptions {
+        rate,
+        channels: 1,
+        format: concat_media::SampleFormat::F32,
+        filters: vec![format!("atempo={speed}")],
+        ..Default::default()
+    };
+    let mut audio =
+        concat_media::AudioDecoder::open(file, &options).map_err(|error| error.to_string())?;
+    let mut result = Vec::new();
+    while !cancel.load(Ordering::Relaxed) {
+        let Some(samples) = audio.next_f32().map_err(|error| error.to_string())? else {
+            break;
+        };
+        result.extend(samples);
+    }
+    drop(audio);
+    if cancel.load(Ordering::Relaxed) {
+        return Err("speech generation cancelled".to_owned());
+    }
+    if result.is_empty() {
+        return Err("changing the speech rate produced no audio".to_owned());
+    }
+    std::fs::write(file, wav_bytes(&result, rate)).map_err(|error| error.to_string())?;
+    Ok(result.len() as f64 / f64::from(rate))
 }
 
 /// The recording a request reads the voice from, as mono samples at

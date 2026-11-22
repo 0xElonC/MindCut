@@ -82,7 +82,11 @@ fn reply_schema(method: &str, generator: &mut SchemaGenerator) -> Option<Value> 
         }),
         "ai.status" => json!({
             "type": "object",
-            "description": "Local AI status. Transcription includes model ids, sizes, installation and whether the engine is busy; other entries report notConnected."
+            "description": "Local AI status. Transcription includes model ids, sizes, installation and whether the engine is busy; speech generation includes model and offline availability; other entries report notConnected."
+        }),
+        "speech.voices" => json!({
+            "type": "object",
+            "description": "Stock voice IDs, required models and availability. Custom voices are excluded."
         }),
         "transcript.query" => json!({
             "type": "object",
@@ -92,7 +96,7 @@ fn reply_schema(method: &str, generator: &mut SchemaGenerator) -> Option<Value> 
         "catalogue.list" => of::<Vec<PackageInfo>>(generator),
         "template.list" => of::<Vec<TemplateInfo>>(generator),
         "template.save" => of::<TemplateInfo>(generator),
-        "export.run" | "media.transcribe" => of::<Started>(generator),
+        "export.run" | "media.transcribe" | "speech.generate" => of::<Started>(generator),
         "export.status" => of::<JobStatus>(generator),
         "preview.frame" => json!({
             "description": "The file written when the request names an `output`; the picture itself when it does not.",

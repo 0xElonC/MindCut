@@ -72,6 +72,22 @@ pub enum Request {
     /// Whether the on-device AI engines are installed and busy.
     #[serde(rename = "ai.status")]
     AiStatus,
+    /// Lists stock voice IDs and the models they require.
+    #[serde(rename = "speech.voices")]
+    SpeechVoices,
+    /// Generates a project-local WAV and imports it as media.
+    #[serde(rename = "speech.generate")]
+    SpeechGenerate {
+        /// Open project folder.
+        path: String,
+        /// Text to say.
+        text: String,
+        /// Stock ID from speech_voices.
+        voice_id: i32,
+        /// Rate, 0.5–2; defaults to 1.
+        #[serde(default)]
+        speed: Option<f32>,
+    },
     /// Starts an on-device transcription of a project source.
     #[serde(rename = "media.transcribe")]
     MediaTranscribe {
@@ -305,6 +321,7 @@ impl Request {
             | Request::EditRedo { path }
             | Request::MediaImport { path, .. }
             | Request::MediaTranscribe { path, .. }
+            | Request::SpeechGenerate { path, .. }
             | Request::TranscriptQuery { path, .. }
             | Request::TemplateSave { path, .. }
             | Request::ExportRun { path, .. }
@@ -390,6 +407,8 @@ pub enum Reply {
     Media(MediaSummary),
     /// Status of the on-device AI engines.
     AiStatus(Value),
+    /// Stock voices and their model requirements.
+    Voices(Value),
     /// A saved transcript and matching word times.
     Transcript(Value),
     /// [`Request::CatalogueList`].
@@ -524,6 +543,12 @@ pub struct JobStatus {
     /// The written file's picture size, once done.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub height: Option<u32>,
+    /// The generated audio's media item, for a finished speech job.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_id: Option<String>,
+    /// The generated audio's duration in seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration: Option<f64>,
     /// Why it failed, or that it was cancelled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<ApiError>,
@@ -543,6 +568,8 @@ impl JobStatus {
             fraction: 0.0,
             width: None,
             height: None,
+            media_id: None,
+            duration: None,
             error: None,
         }
     }
@@ -644,6 +671,8 @@ pub enum ErrorCode {
     Unauthorized,
     /// A requested model is not installed.
     ModelMissing,
+    /// A voice does not exist, requires a reference, or is unavailable offline.
+    VoiceUnavailable,
     /// Everything else: a file that could not be read or written, a decode
     /// that failed, a model that did not download.
     Failed,
@@ -664,6 +693,7 @@ impl ErrorCode {
             ErrorCode::Cancelled => -32005,
             ErrorCode::Unauthorized => -32006,
             ErrorCode::ModelMissing => -32007,
+            ErrorCode::VoiceUnavailable => -32008,
         }
     }
 }
@@ -736,6 +766,42 @@ impl From<Result<Reply, ApiError>> for Response {
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all_fields = "camelCase")]
 pub enum Event {
+    /// A speech job reported progress.
+    #[serde(rename = "speech.progress")]
+    SpeechProgress {
+        /// Job ID.
+        job: String,
+        /// Project folder.
+        path: String,
+        /// Current stage, without input text.
+        stage: String,
+        /// Fraction complete for this stage.
+        fraction: f32,
+    },
+    /// A speech job finished and its audio is in the project bin.
+    #[serde(rename = "speech.done")]
+    SpeechDone {
+        /// Job ID.
+        job: String,
+        /// Project folder.
+        path: String,
+        /// Path to the generated WAV.
+        output: String,
+        /// The imported media ID.
+        media_id: String,
+        /// Audio duration in seconds.
+        duration: f64,
+    },
+    /// A speech job failed or was cancelled.
+    #[serde(rename = "speech.failed")]
+    SpeechFailed {
+        /// Job ID.
+        job: String,
+        /// Project folder.
+        path: String,
+        /// Failure reason, without input text.
+        error: ApiError,
+    },
     /// A transcript job reported its stage and progress.
     #[serde(rename = "transcript.progress")]
     TranscriptProgress {
@@ -850,7 +916,10 @@ impl Event {
     /// The job this event is about.
     pub fn job(&self) -> &str {
         match self {
-            Event::TranscriptProgress { job, .. }
+            Event::SpeechProgress { job, .. }
+            | Event::SpeechDone { job, .. }
+            | Event::SpeechFailed { job, .. }
+            | Event::TranscriptProgress { job, .. }
             | Event::TranscriptDone { job, .. }
             | Event::TranscriptFailed { job, .. }
             | Event::CutoutProgress { job, .. }

@@ -781,6 +781,7 @@ impl SettingsPane {
         self.server_error.clear();
         let exporter = studio.host.exporter.clone();
         let transcriber = Arc::clone(&studio.host.transcriber);
+        let speech = Arc::clone(&studio.host.speech);
         let open_projects = studio.host.open_projects.clone();
         let dirs = studio.host.dirs.clone();
         let prefs = &studio.prefs.server;
@@ -815,6 +816,7 @@ impl SettingsPane {
                     let mut api = concat_api::Api::new(events)?;
                     api.share_exporter(exporter);
                     api.share_transcriber(transcriber);
+                    api.share_speech(speech);
                     api.share_open_projects(open_projects);
                     Ok(api)
                 })

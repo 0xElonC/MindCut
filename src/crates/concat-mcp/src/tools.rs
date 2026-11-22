@@ -464,11 +464,26 @@ pub fn catalogue() -> Vec<Tool> {
         method(
             "ai_status",
             "Check local AI models",
-            "Read-only: installed Whisper models, sizes, and transcription/download activity. Other AI features report not connected.",
+            "Read-only: installed Whisper models and speech models, sizes, and transcription, synthesis or download activity.",
             "ai.status",
             Raw,
         )
         .reading(),
+        method(
+            "speech_voices",
+            "List local speech voices",
+            "Stock voice IDs, required models and offline availability. Cloned voices are excluded.",
+            "speech.voices",
+            Raw,
+        )
+        .reading(),
+        method(
+            "speech_generate",
+            "Generate speech locally",
+            "Reads `text` with `voiceId` at optional `speed` (0.5–2). Writes a WAV in the project audio folder and imports it into the bin only. Returns a `job`; `export_status` returns `mediaId` and `duration` after import. Cancel with `export_cancel`. If the model is missing, download it in Settings > Speech; this tool never downloads.",
+            "speech.generate",
+            Raw,
+        ),
         method(
             "media_transcribe",
             "Transcribe project media locally",
@@ -495,7 +510,7 @@ pub fn catalogue() -> Vec<Tool> {
         method(
             "export_status",
             "Job status",
-            "How an export or transcription job stands, at once: `state` (\"running\", \"done\", \"cancelled\" or \"failed\"), `stage` and its `fraction` (0-1), then the output path or the error. Transcription stages are \"reading audio\", \"loading model\" and \"transcribing\". Exports also report rendered frames and picture size.",
+            "How an export, transcription or speech job stands: `state` (\"running\", \"done\", \"cancelled\" or \"failed\"), `stage` and its `fraction` (0-1), then the output path or the error. Transcription stages are \"reading audio\", \"loading model\" and \"transcribing\". Exports also report frames and size; finished speech jobs report `mediaId` and `duration` in seconds.",
             "export.status",
             Raw,
         )
@@ -512,7 +527,7 @@ pub fn catalogue() -> Vec<Tool> {
         method(
             "export_cancel",
             "Cancel a job",
-            "Requests that a running export or transcription job stop; it then ends as \"cancelled\".",
+            "Requests that a running export, transcription or speech job stop; it then ends as \"cancelled\".",
             "export.cancel",
             Raw,
         )
@@ -613,7 +628,6 @@ impl Toolbox {
                     "description": tool.description,
                     "inputSchema": schema,
                     "annotations": {
-                        "title": tool.title,
                         "readOnlyHint": tool.read_only,
                         "destructiveHint": tool.destructive,
                         "idempotentHint": tool.idempotent,
@@ -1018,6 +1032,33 @@ mod tests {
     use crate::schema::check;
 
     #[test]
+    fn speech_tools_list_stock_voices_and_generation_with_correct_hints() {
+        let tools = Toolbox::new().list();
+        let voices = tools
+            .iter()
+            .find(|tool| tool["name"] == "speech_voices")
+            .expect("speech_voices");
+        let generate = tools
+            .iter()
+            .find(|tool| tool["name"] == "speech_generate")
+            .expect("speech_generate");
+        assert_eq!(voices["annotations"]["readOnlyHint"], true);
+        assert_eq!(generate["annotations"]["readOnlyHint"], false);
+        assert!(
+            voices["description"]
+                .as_str()
+                .expect("description")
+                .contains("Cloned voices are excluded")
+        );
+        for name in ["path", "text", "voiceId", "speed"] {
+            assert!(
+                generate["inputSchema"]["properties"].get(name).is_some(),
+                "missing {name}"
+            );
+        }
+    }
+
+    #[test]
     fn transcription_tools_list_their_inputs_outputs_and_read_only_flags() {
         let list = Toolbox::new().list();
         let tool = |name| {
@@ -1083,6 +1124,11 @@ mod tests {
                 json!({ "path": "/tmp/Cut", "video": { "width": 1920, "height": 1080, "rateNum": 30000, "rateDen": 1001 } }),
             ),
             ("media_probe", json!({ "path": "/tmp/a.mp4" })),
+            ("speech_voices", json!({})),
+            (
+                "speech_generate",
+                json!({ "path": "/tmp/Cut", "text": "Hello", "voiceId": 2000, "speed": 1.2 }),
+            ),
             ("ai_status", json!({})),
             (
                 "media_transcribe",

@@ -276,7 +276,7 @@ impl Api {
                 "modelsDir": status.models_dir,
                 "models": status.models,
             },
-            "speechGeneration": { "status": "notConnected" },
+            "speechGeneration": self.speech_status(),
             "vocalSeparation": { "status": "notConnected" },
             "videoEnhancement": { "status": "notConnected" },
         })
@@ -523,7 +523,7 @@ mod tests {
         let status = api.ai_status();
         assert_eq!(status["transcription"]["busy"], false);
         assert_eq!(status["transcription"]["installed"], false);
-        assert_eq!(status["speechGeneration"]["status"], "notConnected");
+        assert!(status["speechGeneration"]["installed"].is_boolean());
         let Response::Error(error) = api.dispatch(Request::MediaTranscribe {
             path,
             media_id: Some("m1".to_owned()),

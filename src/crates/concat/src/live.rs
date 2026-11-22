@@ -58,34 +58,69 @@ impl Live for WindowLive {
         if !self.on.load(Ordering::Relaxed) {
             return None;
         }
-        ask(|studio| studio.session.as_ref().map(|session| session.path().to_owned()))
-            .ok()
-            .flatten()
+        ask(|studio| {
+            studio
+                .session
+                .as_ref()
+                .map(|session| session.path().to_owned())
+        })
+        .ok()
+        .flatten()
     }
 
     fn snapshot(&self) -> Result<Session, String> {
         let (path, settings, document) = ask(|studio| {
-            studio
-                .session
-                .as_ref()
-                .map(|session| (session.path().to_owned(), session.settings(), session.document()))
+            studio.session.as_ref().map(|session| {
+                (
+                    session.path().to_owned(),
+                    session.settings(),
+                    session.document(),
+                )
+            })
         })?
         .ok_or("No project is open")?;
         Session::detached(&path, settings, &document)
     }
 
     fn apply(&self, command: Command) -> Result<EditorView, String> {
-        ask(move |studio| {
-            let session = studio.session.as_ref().ok_or("No project is open")?;
-            // Tried on a copy first: the window reports a refused edit to
-            // the person as a notice and says nothing to the caller, and an
-            // agent needs the reason.
-            let mut trial =
-                Session::detached(session.path(), session.settings(), &session.document())?;
-            trial.apply(command.clone())?;
-            let created = studio.apply(command);
-            view_of(studio, created)
-        })?
+        ask(move |studio| apply_edit(studio, command))?
+    }
+
+    fn apply_to(&self, path: &str, command: Command) -> Result<EditorView, String> {
+        let on = Arc::clone(&self.on);
+        let path = std::path::PathBuf::from(path);
+        let (send, receive) = mpsc::channel();
+        let claimed = Arc::new(AtomicBool::new(false));
+        let ui_claimed = Arc::clone(&claimed);
+        crate::host::on_ui(move |studio, _, _| {
+            if ui_claimed.swap(true, Ordering::AcqRel) {
+                return; // The caller gave up before we started.
+            }
+            let result = if on.load(Ordering::Relaxed)
+                && studio
+                    .session
+                    .as_ref()
+                    .and_then(|session| std::fs::canonicalize(session.path()).ok())
+                    .as_ref()
+                    == Some(&path)
+            {
+                apply_edit(studio, command)
+            } else {
+                Err("the target project is no longer open in the window".to_owned())
+            };
+            let _ = send.send(result);
+        });
+        match receive.recv_timeout(PATIENCE) {
+            Ok(result) => result,
+            Err(mpsc::RecvTimeoutError::Timeout) if claimed.swap(true, Ordering::AcqRel) => {
+                // The edit started. Wait for its outcome so the caller does
+                // not remove the WAV after the window has imported it.
+                receive
+                    .recv()
+                    .map_err(|_| "the window closed while applying the edit".to_owned())?
+            }
+            Err(_) => Err("the window did not start the edit: it is busy or closing".to_owned()),
+        }
     }
 
     fn undo(&self) -> Result<EditorView, String> {
@@ -111,4 +146,14 @@ impl Live for WindowLive {
             Ok(())
         })?
     }
+}
+
+fn apply_edit(studio: &mut Studio, command: Command) -> Result<EditorView, String> {
+    let session = studio.session.as_ref().ok_or("No project is open")?;
+    // Tried on a copy first: the window reports a refused edit as a notice,
+    // and the caller needs the reason.
+    let mut trial = Session::detached(session.path(), session.settings(), &session.document())?;
+    trial.apply(command.clone())?;
+    let created = studio.apply(command);
+    view_of(studio, created)
 }
