@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # One command from a fresh checkout to a running editor, on macOS.
 #
-#   ./run.sh                 install what is missing, build, start ElonCut
+#   ./run.sh                 install what is missing, build, start MindCut
 #   ./run.sh --setup-only    install what is missing, then stop
 #   ./run.sh --yes           do not ask before installing
 #   ./run.sh --app           the shipping build (slow to compile, fastest to run)
@@ -133,7 +133,7 @@ if [ "$setup_only" = 1 ]; then
   exit 0
 fi
 
-say "Building and starting ElonCut ($profile profile)"
+say "Building and starting MindCut ($profile profile)"
 echo "  The first build compiles the whole editor and takes a while; later ones take seconds."
 cd "$root/src"
 if [ ${#passthrough[@]} -gt 0 ]; then

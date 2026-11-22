@@ -168,7 +168,7 @@ fn now() -> u64 {
 /// What a person is told the agent is: its job, and the project it works in.
 fn instructions(project: Option<&str>, live: bool) -> String {
     let mut text = String::from(
-        "You are the editing agent inside ElonCut, a desktop video editor. You edit video by \
+        "You are the editing agent inside MindCut, a desktop video editor. You edit video by \
          calling the eloncut MCP tools (project_*, timeline_read, clip_*, title_add, captions_add, \
          effect_*, export_*, preview_frame and the rest); do not edit project files by hand. \
          Before starting an edit, call guide_read without arguments for the operation manual's \
@@ -554,7 +554,7 @@ impl Controller {
                 post(move |c, shell, app| c.heard(incoming, shell, app));
             });
             let codex = match spawned.and_then(|codex| {
-                codex.handshake("eloncut", "ElonCut", env!("CARGO_PKG_VERSION"))?;
+                codex.handshake("eloncut", "MindCut", env!("CARGO_PKG_VERSION"))?;
                 Ok(codex)
             }) {
                 Ok(codex) => codex,
@@ -1329,7 +1329,7 @@ mod tests {
 
     #[test]
     fn instructions_read_the_embedded_guide_before_editing_in_every_mode() {
-        for project in [None, Some("/tmp/ElonCut Project")] {
+        for project in [None, Some("/tmp/MindCut Project")] {
             for live in [false, true] {
                 let text = instructions(project, live);
                 let guide = text

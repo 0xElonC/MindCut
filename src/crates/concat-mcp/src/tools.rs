@@ -171,7 +171,7 @@ pub fn catalogue() -> Vec<Tool> {
         Tool {
             name: "guide_read",
             title: "Read the operation manual",
-            description: "Reads the embedded ElonCut operation manual without opening a project or writing files. Before editing, call without arguments for the directory (topic ids and one-line summaries), then pass `topic` to read the relevant topic. An unknown topic returns an error listing available ids. Available in window and headless modes.",
+            description: "Reads the embedded MindCut operation manual without opening a project or writing files. Before editing, call without arguments for the directory (topic ids and one-line summaries), then pass `topic` to read the relevant topic. An unknown topic returns an error listing available ids. Available in window and headless modes.",
             read_only: true,
             destructive: false,
             idempotent: true,

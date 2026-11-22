@@ -1,4 +1,4 @@
-# ElonCut operation manual
+# MindCut operation manual
 
 Match editor tabs to MCP tools, then read, edit and verify the timeline.
 

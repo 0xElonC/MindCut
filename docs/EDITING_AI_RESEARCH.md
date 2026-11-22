@@ -1,4 +1,4 @@
-# ElonCut 剪辑 Agent 调研
+# MindCut 剪辑 Agent 调研
 
 ## Skill 与工具缺口
 

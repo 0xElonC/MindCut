@@ -277,3 +277,20 @@ https://unsplash.com/photos/2v921tlqdXE), used under the Unsplash License. The s
 and is embedded in the app; each card is the effect's own shader run over
 it on the GPU when the app first needs the card (`concat-host`'s
 `cards.rs`).
+
+## ChatCut workflow guides
+
+MindCut's MCP operation manual includes two guides adapted from
+[ChatCut-Inc/agent-plugin](https://github.com/ChatCut-Inc/agent-plugin) at
+commit `a69a54fac266c69a9e76d2767af2e82776a17464`, licensed under Apache-2.0.
+MindCut modified both files for its own MCP tools and local editing workflows:
+
+- [`src/crates/concat-mcp/guides/workflow-verify.md`](src/crates/concat-mcp/guides/workflow-verify.md),
+  adapted from the upstream `codex/skills/verification/SKILL.md`.
+- [`src/crates/concat-mcp/guides/workflow-vertical-montage.md`](src/crates/concat-mcp/guides/workflow-vertical-montage.md),
+  adapted from the upstream `kimi/skills/chatcut-editing-guide/SKILL.md`.
+
+Both guides retain their source attribution and modification notices. The
+full Apache-2.0 licence is in
+[`docs/chatcut-skill-trial/LICENSE`](docs/chatcut-skill-trial/LICENSE), a
+verbatim copy of the [upstream licence at that commit](https://github.com/ChatCut-Inc/agent-plugin/blob/a69a54fac266c69a9e76d2767af2e82776a17464/LICENSE).

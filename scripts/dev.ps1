@@ -3,7 +3,7 @@
   One command from a fresh checkout to a running editor, on Windows.
 
 .DESCRIPTION
-  run.cmd                  install what is missing, build, start ElonCut
+  run.cmd                  install what is missing, build, start MindCut
   run.cmd -SetupOnly       install what is missing, then stop
   run.cmd -Yes             do not ask before installing
   run.cmd -App             the shipping build (slow to compile, fastest to run)
@@ -198,7 +198,7 @@ if ($SetupOnly) {
   exit 0
 }
 
-Say "Building and starting ElonCut ($profileName profile)"
+Say "Building and starting MindCut ($profileName profile)"
 Write-Host '  The first build compiles the whole editor and takes a while; later ones take seconds.'
 Push-Location "$root\src"
 try {

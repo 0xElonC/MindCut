@@ -212,11 +212,11 @@ fn default_location() -> String {
 /// new project failed with EPERM. https://github.com/jub0t/Concat/issues/299
 fn location_on(os: &str, desktop: Option<PathBuf>, home: impl Fn(&str) -> String) -> String {
     match os {
-        "android" => home("ElonCut"),
-        "ios" => home("Documents/ElonCut"),
+        "android" => home("MindCut"),
+        "ios" => home("Documents/MindCut"),
         _ => desktop
-            .map(|desktop| desktop.join("ElonCut").to_string_lossy().into_owned())
-            .unwrap_or_else(|| home("Desktop/ElonCut")),
+            .map(|desktop| desktop.join("MindCut").to_string_lossy().into_owned())
+            .unwrap_or_else(|| home("Desktop/MindCut")),
     }
 }
 
@@ -629,15 +629,15 @@ mod tests {
         let desktop = || Some(PathBuf::from("/desk"));
         assert_eq!(
             location_on("ios", desktop(), home),
-            "/home/Documents/ElonCut"
+            "/home/Documents/MindCut"
         );
-        assert_eq!(location_on("ios", None, home), "/home/Documents/ElonCut");
-        assert_eq!(location_on("android", None, home), "/home/ElonCut");
+        assert_eq!(location_on("ios", None, home), "/home/Documents/MindCut");
+        assert_eq!(location_on("android", None, home), "/home/MindCut");
         assert_eq!(
             PathBuf::from(location_on("macos", desktop(), home)),
-            Path::new("/desk").join("ElonCut")
+            Path::new("/desk").join("MindCut")
         );
-        assert_eq!(location_on("linux", None, home), "/home/Desktop/ElonCut");
+        assert_eq!(location_on("linux", None, home), "/home/Desktop/MindCut");
     }
 
     /// The next untitled name skips every folder already there, and starts

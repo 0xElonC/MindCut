@@ -37,7 +37,7 @@ pub(crate) fn read(arguments: &Value) -> Result<String, ApiError> {
     match topic {
         None => {
             let mut directory = String::from(
-                "ElonCut operation manual\nCall guide_read with {\"topic\": \"<id>\"} to read a topic.\n\n",
+                "MindCut operation manual\nCall guide_read with {\"topic\": \"<id>\"} to read a topic.\n\n",
             );
             for guide in GUIDES {
                 directory.push_str(&format!("- {}: {}\n", guide.id, guide.summary));

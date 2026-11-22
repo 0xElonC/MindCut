@@ -9,7 +9,7 @@ metadata:
 
 # Verify a Concat edit
 
-Adapted for ElonCut from ChatCut-Inc's [Codex Verification skill](https://github.com/ChatCut-Inc/agent-plugin/blob/a69a54fac266c69a9e76d2767af2e82776a17464/codex/skills/verification/SKILL.md). Upstream supplies no separate per-file copyright header. This file is modified; the upstream Apache-2.0 license is preserved in [LICENSE](../LICENSE).
+Adapted for MindCut from ChatCut-Inc's [Codex Verification skill](https://github.com/ChatCut-Inc/agent-plugin/blob/a69a54fac266c69a9e76d2767af2e82776a17464/codex/skills/verification/SKILL.md). Upstream supplies no separate per-file copyright header. This file is modified; the upstream Apache-2.0 license is preserved in [LICENSE](../LICENSE).
 
 1. Confirm the open project directory and the edit the user requested. Read the active timeline with `timeline_read`; use `project_get` if the summary does not show the settings you need. Check identities, tracks, times and expected settings against the request, not against recollection.
 2. For a visible change, call `preview_frame` with `path` and `time` in timeline seconds. Leave `output` unset so the tool returns the image without writing a file. Sample within the affected interval, at meaningful boundaries on both sides of a cut, and outside the range when neighboring material should be unchanged. Stay before the timeline's end; for exact boundary tests use adjacent renderable frames. Inspect the actual returned image for composition, text legibility and unintended changes.

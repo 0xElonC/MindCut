@@ -111,12 +111,12 @@ fn main() {
         let icon = "../../../assets/icons/concat.ico";
         println!("cargo:rerun-if-changed={icon}");
         // The file's name and description as Windows shows them in its
-        // properties, and as code signing checks them: "ElonCut" in every
+        // properties, and as code signing checks them: "MindCut" in every
         // build, where the default would be the crate's lower-case name.
         winresource::WindowsResource::new()
             .set_icon(icon)
-            .set("ProductName", "ElonCut")
-            .set("FileDescription", "ElonCut")
+            .set("ProductName", "MindCut")
+            .set("FileDescription", "MindCut")
             .set(
                 "LegalCopyright",
                 "Copyright 2026 Jareer Abdullah, AGPL-3.0-or-later",

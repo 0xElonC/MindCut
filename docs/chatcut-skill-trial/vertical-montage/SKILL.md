@@ -9,7 +9,7 @@ metadata:
 
 # Assemble a vertical montage in Concat
 
-Adapted for ElonCut from ChatCut-Inc's [Kimi Work Editing Guide](https://github.com/ChatCut-Inc/agent-plugin/blob/a69a54fac266c69a9e76d2767af2e82776a17464/kimi/skills/chatcut-editing-guide/SKILL.md). Upstream supplies no separate per-file copyright header. This file is modified; the upstream Apache-2.0 license is preserved in [LICENSE](../LICENSE).
+Adapted for MindCut from ChatCut-Inc's [Kimi Work Editing Guide](https://github.com/ChatCut-Inc/agent-plugin/blob/a69a54fac266c69a9e76d2767af2e82776a17464/kimi/skills/chatcut-editing-guide/SKILL.md). Upstream supplies no separate per-file copyright header. This file is modified; the upstream Apache-2.0 license is preserved in [LICENSE](../LICENSE).
 
 1. Confirm the target length, what should hook the viewer, and the project path. For an existing project, use `project_open` if it is not already open, then read the active timeline with `timeline_read`. If it already contains edits, don't change its canvas or overwrite it without permission: offer a separate project, and use `project_create` only after the user agrees. If there is no named project or absolute local media path, ask rather than guessing.
 2. Use `media_probe` to confirm duration and dimensions for each local file, then `media_import` to add it to the agreed project. Get media IDs from each import or `timeline_read`. Make a shot plan: source, source in/out, timeline order, and what each shot contributes. Start with the strongest evidence or action, then provide context and a payoff. Omit redundant shots. Use the user's picks or timecodes if you cannot see or hear the source reliably; do not invent content or timestamps.

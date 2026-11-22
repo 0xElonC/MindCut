@@ -1155,7 +1155,7 @@ const LOG_LEVEL_NAMES: [&str; 5] = ["Errors only", "Warnings", "Normal", "Debug"
 /// [`SourcePreference::ALL`]'s order, for the log's line.
 const DOWNLOAD_SOURCE_NAMES: [&str; 5] = [
     "Automatic",
-    "ElonCut's mirror",
+    "MindCut's mirror",
     "hf-mirror.com",
     "Original source",
     "Custom URL",
