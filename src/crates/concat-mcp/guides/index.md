@@ -34,10 +34,35 @@ workflow-verify and templates-export as needed.
    an inline image. A still cannot prove motion, pacing or audio; report
    which checks you actually made. Save or export when requested.
 
+## Set a clip's voice isolation mix
+
+There is no dedicated MCP tool for voice isolation. Use `edit_apply` with
+`setClipVoice` on a clip with an audio track. For example, to request speech
+at gain 1 and the background at gain 0:
+
+```json
+{
+  "path": "/absolute/path/to/project",
+  "command": {
+    "op": "setClipVoice",
+    "clipId": "c11",
+    "voice": {"kind": "speech", "voice": 1, "background": 0}
+  }
+}
+```
+
+Use the clip id from `timeline_read`. Set `kind` to `speech` for dialogue or
+`vocals` for singing. Both gains are 0–2, where 0 mutes that part and 1 is
+unity gain. Set the command's outer `voice` field to `null` to clear the mix.
+Reading back the setting with `project_get` confirms the configuration only.
+It does not verify that the required model is installed or available, that
+separation rendered, or how it sounds. If separation matters, ask the user to
+play the affected interval in the app and confirm the result.
+
 ## What you cannot do
 
-The MCP tools do not provide automatic transcription, speech generation, vocal
-isolation, image quality enhancement, a sound library, asset library organization,
+The MCP tools do not provide automatic transcription, speech generation,
+image quality enhancement, a sound library, asset library organization,
 or invoking editor preset cards by name. Tell the user which capability is
 unavailable. Ask for local media, genuine caption text or timings, or explicit
 style settings as appropriate. Never fabricate inputs or claim work you did not do.

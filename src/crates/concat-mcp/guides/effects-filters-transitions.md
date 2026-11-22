@@ -25,6 +25,12 @@ whose motion matters, report whether actual playback was checked.
 ## What you cannot do
 
 You cannot invoke uncatalogued effects or choose an editor preset card by its
-display name. An audio effect is not vocal isolation or speech generation.
+display name. An audio effect does not generate speech.
 Color and sharpness adjustments are not a dedicated image enhancement workflow.
 Tell the user when the requested operation is unavailable; see the index.
+
+Voice isolation is a clip mix, separate from the audio effect chain. There
+is no dedicated MCP tool; use `edit_apply` with `setClipVoice` and `speech`
+or `vocals` (see the index). Setting the mix does not verify model availability,
+rendered separation, or how it sounds. Ask the user to check playback in the
+app when separation matters.

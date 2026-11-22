@@ -33,6 +33,11 @@ Describe which positions were inspected; stills cannot prove smooth playback.
 
 ## What you cannot do
 
-These tools do not track a subject automatically, animate arbitrary properties,
-or isolate a voice. Use manually chosen positions or ask the user for reference
-times. See the index for other unavailable features.
+These tools do not track a subject automatically or animate arbitrary
+properties. Use manually chosen positions or ask the user for reference times.
+
+There is no dedicated MCP tool for voice isolation. To set a clip's `speech`
+or `vocals` mix, use `edit_apply` with `setClipVoice` (see the index). The
+setting does not verify model availability, rendered separation, or how it
+sounds. Ask the user to check playback in the app when separation matters.
+See the index for other unavailable features.
