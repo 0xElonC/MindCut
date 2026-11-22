@@ -36,7 +36,7 @@ pub struct ThreadSetup {
 pub const SERVER_NAME: &str = "eloncut";
 
 impl ThreadSetup {
-    fn fields(&self) -> Map<String, Value> {
+    fn fields(&self, server_name: &str) -> Map<String, Value> {
         let mut env = Map::new();
         for (key, value) in &self.mcp.env {
             env.insert(key.clone(), json!(value));
@@ -55,7 +55,7 @@ impl ThreadSetup {
             "config".into(),
             json!({
                 "mcp_servers": {
-                    SERVER_NAME: {
+                    server_name: {
                         "command": self.mcp.command,
                         "args": self.mcp.args,
                         "env": env,
@@ -68,12 +68,20 @@ impl ThreadSetup {
 
     /// `thread/start`.
     pub fn start_params(&self) -> Value {
-        Value::Object(self.fields())
+        self.start_params_for(SERVER_NAME)
     }
 
     /// `thread/resume`.
     pub fn resume_params(&self, thread: &str) -> Value {
-        let mut object = self.fields();
+        self.resume_params_for(thread, SERVER_NAME)
+    }
+
+    pub(crate) fn start_params_for(&self, server_name: &str) -> Value {
+        Value::Object(self.fields(server_name))
+    }
+
+    pub(crate) fn resume_params_for(&self, thread: &str, server_name: &str) -> Value {
+        let mut object = self.fields(server_name);
         object.insert("threadId".into(), json!(thread));
         Value::Object(object)
     }
@@ -277,7 +285,7 @@ impl Item {
     }
 }
 
-fn shorten(text: &str, longest: usize) -> String {
+pub(crate) fn shorten(text: &str, longest: usize) -> String {
     let flat: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
     if flat.chars().count() <= longest {
         flat
