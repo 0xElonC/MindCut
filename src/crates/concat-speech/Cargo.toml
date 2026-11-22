@@ -27,6 +27,7 @@ ort = { workspace = true, optional = true }
 # version ort asks for, per target.
 concat-vision = { workspace = true, optional = true, features = ["infer"] }
 tokenizers = { version = "0.23", optional = true, default-features = false, features = ["fancy-regex"] }
+tempfile = { version = "3", optional = true }
 
 # What a run says about itself: which model loaded, how long a read took,
 # where a loop ran out. Through the facade, so the window's log file and a
@@ -61,7 +62,7 @@ ort = { workspace = true, optional = true, features = ["coreml"] }
 ort = { workspace = true, optional = true, features = ["directml"] }
 
 [features]
-chatterbox = ["dep:ort", "dep:tokenizers", "dep:concat-vision"]
+chatterbox = ["dep:ort", "dep:tokenizers", "dep:concat-vision", "dep:tempfile"]
 # Voice isolation: DeepFilterNet 3, carried in the app, run on ONNX Runtime's
 # CPU provider on every platform. See isolate.rs.
 isolate = ["dep:concat-vision", "dep:realfft"]

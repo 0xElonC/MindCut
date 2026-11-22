@@ -518,11 +518,7 @@ impl Engine {
         if text_ids.iter().all(|&id| id == TEXT_END_TOKEN) {
             return Ok(Vec::new());
         }
-        log::debug!(
-            "chatterbox: {} text tokens, ending {:?}",
-            text_ids.len(),
-            &text_ids[text_ids.len().saturating_sub(3)..]
-        );
+        log::debug!("chatterbox: {} text tokens", text_ids.len());
         let mut embed = self
             .embed_tokens
             .lock()

@@ -1429,6 +1429,7 @@ dependencies = [
  "realfft",
  "serde",
  "serde_json",
+ "tempfile",
  "tokenizers",
  "ureq 2.12.1",
  "whisper-rs",
