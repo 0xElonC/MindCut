@@ -824,15 +824,20 @@ impl Speech {
             let cached = engine.as_ref().expect("engine cached above");
             let (chatterbox, accelerated) = (&cached.tts, cached.accelerated);
 
-            // A named voice's recording is one Concat carries; a chosen
-            // recording is the request's own.
-            let recordings = if is_clone(request.voice) {
-                dir.clone()
+            let samples = if let Some(output) = target {
+                // Automation writes only within its checked project folder.
+                // The model directory might be outside it (e.g. portable mode).
+                progress(JobStage::Reading);
+                bundled_reference(output, request)?
             } else {
-                recordings_dir(dirs)?
+                let recordings = if is_clone(request.voice) {
+                    dir.clone()
+                } else {
+                    recordings_dir(dirs)?
+                };
+                progress(JobStage::Reading);
+                reference_samples(&recordings, request)?
             };
-            progress(JobStage::Reading);
-            let samples = reference_samples(&recordings, request)?;
             progress(JobStage::Working {
                 done: 0.0,
                 next: CHATTERBOX_STEP,
@@ -922,6 +927,25 @@ fn recordings_dir(dirs: &AppDirs) -> Result<PathBuf, String> {
             .map_err(|error| format!("could not write {}: {error}", path.display()))?;
     }
     Ok(dir)
+}
+
+/// Decodes the selected embedded voice in a temporary project directory.
+#[cfg(feature = "chatterbox")]
+fn bundled_reference(output: &Path, request: &SpeakRequest) -> Result<Vec<f32>, String> {
+    let name = recording_name(request.voice)?;
+    let (_, bytes) = RECORDINGS
+        .iter()
+        .find(|(file, _)| *file == name)
+        .ok_or("the bundled voice recording is unavailable")?;
+    let parent = output
+        .parent()
+        .ok_or("speech output has no parent folder")?;
+    let scratch = tempfile::Builder::new()
+        .prefix(".speech-voice-")
+        .tempdir_in(parent)
+        .map_err(|error| error.to_string())?;
+    std::fs::write(scratch.path().join(name), bytes).map_err(|error| error.to_string())?;
+    reference_samples(scratch.path(), request)
 }
 
 /// How far ahead of Chatterbox's last report its next is taken to be: it
@@ -1068,6 +1092,15 @@ fn stretch_wav(
     Ok(result.len() as f64 / f64::from(rate))
 }
 
+#[cfg_attr(not(feature = "chatterbox"), allow(dead_code))]
+fn recording_name(voice: i32) -> Result<&'static str, String> {
+    CHATTERBOX_VOICES
+        .iter()
+        .find(|(id, _, _)| *id == voice)
+        .and_then(|(_, _, file)| *file)
+        .ok_or_else(|| format!("voice {voice} has no recording"))
+}
+
 /// The recording a request reads the voice from, as mono samples at
 /// [`REFERENCE_RATE`]: one of the stock recordings in `dir` for a named
 /// voice, or the request's reference for a chosen one, cut to
@@ -1087,12 +1120,7 @@ fn reference_samples(dir: &Path, request: &SpeakRequest) -> Result<Vec<f32>, Str
             },
         )
     } else {
-        let file = CHATTERBOX_VOICES
-            .iter()
-            .find(|(id, _, _)| *id == request.voice)
-            .and_then(|(_, _, file)| *file)
-            .ok_or_else(|| format!("voice {} has no recording", request.voice))?;
-        (dir.join(file), 0.0)
+        (dir.join(recording_name(request.voice)?), 0.0)
     };
     let options = concat_media::AudioOptions {
         start: (start > 0.0).then_some(start),
@@ -1316,6 +1344,7 @@ mod tests {
             data: std::env::temp_dir().join(format!("concat-tts-stock-{}", std::process::id())),
         };
         let dir = recordings_dir(&dirs).expect("written");
+        let project_audio = tempfile::tempdir().expect("project audio");
         let stock: Vec<(i32, &str)> = CHATTERBOX_VOICES
             .iter()
             .filter_map(|(id, _, file)| file.map(|file| (*id, file)))
@@ -1335,6 +1364,15 @@ mod tests {
                 project: String::new(),
             };
             let samples = reference_samples(&dir, &request).expect("reads");
+            let automation = bundled_reference(&project_audio.path().join("speech.wav"), &request)
+                .expect("automation reads the same bundled recording");
+            assert_eq!(automation, samples);
+            assert_eq!(
+                std::fs::read_dir(project_audio.path())
+                    .expect("audio folder")
+                    .count(),
+                0
+            );
             let seconds = samples.len() as f64 / f64::from(REFERENCE_RATE);
             assert!(
                 (seconds - REFERENCE_SECONDS).abs() < 0.1,

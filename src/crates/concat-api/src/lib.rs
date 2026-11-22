@@ -30,6 +30,7 @@
 
 #[cfg(feature = "schema")]
 mod contract;
+mod enhance;
 mod job;
 pub mod message;
 #[cfg(test)]
@@ -37,6 +38,7 @@ mod project_close_tests;
 pub mod rpc;
 mod speech;
 mod transcription;
+mod vocals;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -284,6 +286,9 @@ pub struct Api {
     transcriber: Arc<concat_speech::Transcriber>,
     speech: Arc<concat_speech::Speech>,
     speech_jobs: Vec<speech::Pending>,
+    vocal_separator: Arc<concat_host::SingleFlight>,
+    enhancers: Arc<concat_host::enhance::Enhancers>,
+    enhancement: Option<enhance::Pending>,
     events: EventSink,
     jobs: Jobs,
     /// Every job's last known state and each running one's stop flag, fed
@@ -348,6 +353,9 @@ impl Api {
             transcriber: Arc::new(concat_speech::Transcriber::new()),
             speech: Arc::new(concat_speech::Speech::new()),
             speech_jobs: Vec::new(),
+            vocal_separator: Arc::new(concat_host::SingleFlight::new()),
+            enhancers: Arc::new(concat_host::enhance::Enhancers::new(&dirs.data)),
+            enhancement: None,
             sessions: BTreeMap::new(),
             roots: Vec::new(),
             open: OpenProjects::default(),
@@ -406,6 +414,7 @@ impl Api {
     /// [`Request::ExportStatus`].
     pub fn job_status(&mut self, job: &str) -> Result<JobStatus, ApiError> {
         self.reap_speech(false);
+        self.reap_enhancement(false);
         self.jobs.reap(&self.book);
         self.book.status(job).ok_or_else(|| {
             ApiError::new(
@@ -499,8 +508,9 @@ impl Api {
     /// How many jobs are still running.
     pub fn running(&mut self) -> usize {
         self.reap_speech(false);
+        self.reap_enhancement(false);
         self.jobs.reap(&self.book);
-        self.jobs.threads.len() + self.speech_jobs.len()
+        self.jobs.threads.len() + self.speech_jobs.len() + usize::from(self.enhancement.is_some())
     }
 
     /// Waits for every running job to end. A transport calls this before
@@ -508,12 +518,14 @@ impl Api {
     pub fn finish(&mut self) {
         self.jobs.finish();
         self.reap_speech(true);
+        self.reap_enhancement(true);
     }
 
     /// Runs one request. The response is what the request is worth; a job
     /// it begins reports through the sink from then on.
     pub fn dispatch(&mut self, request: Request) -> Response {
         self.reap_speech(false);
+        self.reap_enhancement(false);
         self.jobs.reap(&self.book);
         self.run(request).into()
     }
@@ -522,11 +534,12 @@ impl Api {
         let view = |view: EditorView| Ok(Reply::View(Box::new(view)));
         // A request about the project the window has open is about what is
         // on screen: read it afresh, and let the window make the edits.
+        let live = request.project_path().and_then(|path| self.live_at(path));
         if let Some(path) = request.project_path()
-            && let Some(live) = self.live_at(path)
+            && let Some(live) = live.as_ref()
         {
             let path = path.to_owned();
-            self.refresh_live(&path, &live)?;
+            self.refresh_live(&path, live)?;
             match &request {
                 Request::ProjectClose { .. } => return Ok(Reply::Done(Done {})),
                 Request::EditUndo { .. } => return view(live.undo().map_err(refused)?),
@@ -550,9 +563,31 @@ impl Api {
             Request::Version => Ok(Reply::Version(self.version())),
             Request::AiStatus => Ok(Reply::AiStatus(self.ai_status())),
             Request::SpeechVoices => Ok(Reply::Voices(self.speech_voices())),
-            Request::SpeechGenerate { path, text, voice_id, speed } => {
-                Ok(Reply::Started(self.generate_speech(&path, text, voice_id, speed)?))
-            }
+            Request::SpeechGenerate {
+                path,
+                text,
+                voice_id,
+                speed,
+            } => Ok(Reply::Started(
+                self.generate_speech(&path, text, voice_id, speed, live)?,
+            )),
+            Request::ClipEnhance {
+                path,
+                clip_id,
+                scale,
+            } => Ok(Reply::Started(
+                self.enhance_clip(&path, &clip_id, scale, live)?,
+            )),
+            Request::AudioSeparateVocals {
+                path,
+                media_id,
+                clip_id,
+            } => Ok(Reply::Started(self.separate_vocals(
+                &path,
+                media_id.as_deref(),
+                clip_id.as_deref(),
+                live.is_some(),
+            )?)),
             Request::MediaTranscribe {
                 path,
                 media_id,
@@ -756,6 +791,7 @@ impl Api {
 
     /// [`Request::EditApply`].
     pub fn apply(&mut self, path: &str, command: Command) -> Result<EditorView, ApiError> {
+        self.preflight_vocals(&command)?;
         if let Some(live) = self.live_at(path) {
             return live.apply(command).map_err(refused);
         }
@@ -932,7 +968,13 @@ impl Api {
 
     /// [`Request::ExportCancel`].
     pub fn cancel(&mut self, job: &str) -> Result<(), ApiError> {
-        if self.speech_jobs.iter().any(|pending| pending.id() == job) && self.book.cancel(job) {
+        if (self.speech_jobs.iter().any(|pending| pending.id() == job)
+            || self
+                .enhancement
+                .as_ref()
+                .is_some_and(|pending| pending.id() == job))
+            && self.book.cancel(job)
+        {
             return Ok(());
         }
         self.jobs.reap(&self.book);
@@ -942,14 +984,14 @@ impl Api {
                 format!("no job {job} is running"),
             ));
         }
-        let is_transcript = self.jobs.transcripts.contains(job);
+        let standalone = self.jobs.standalone.contains(job);
         if !self.book.cancel(job) {
             return Err(ApiError::new(
                 ErrorCode::NotFound,
                 format!("no job {job} is running"),
             ));
         }
-        if !is_transcript {
+        if !standalone {
             // Export workers also run these analysers before rendering.
             self.cutouts.cancel();
             self.stabilizers.cancel();
@@ -1055,7 +1097,8 @@ impl Api {
 struct Jobs {
     minted: u64,
     threads: Vec<(String, JoinHandle<()>)>,
-    transcripts: std::collections::BTreeSet<String>,
+    // Workers that do not use the export analysers.
+    standalone: std::collections::BTreeSet<String>,
 }
 
 impl Jobs {
@@ -1072,7 +1115,7 @@ impl Jobs {
             let ended = thread.is_finished();
             if ended {
                 book.abandon(name);
-                self.transcripts.remove(name);
+                self.standalone.remove(name);
             }
             !ended
         });
@@ -1083,7 +1126,7 @@ impl Jobs {
         for (_, thread) in self.threads.drain(..) {
             let _ = thread.join();
         }
-        self.transcripts.clear();
+        self.standalone.clear();
     }
 }
 
@@ -1426,7 +1469,6 @@ mod tests {
         scratch.path().join(name).to_string_lossy().into_owned()
     }
 
-
     /// A stand-in for a window: a session of its own that the API reaches
     /// through [`Live`], counting what is done to it.
     struct Window {
@@ -1466,7 +1508,10 @@ mod tests {
         let path = project(&mut api, &scratch, "Live");
         // The window has it open: its own session, not the API's.
         let window_session = {
-            ok(api.dispatch(Request::ProjectClose { path: path.clone(), save: false }));
+            ok(api.dispatch(Request::ProjectClose {
+                path: path.clone(),
+                save: false,
+            }));
             let info = projects::open(&path).expect("opens");
             Session::open_info(&info).expect("session")
         };
@@ -1487,7 +1532,9 @@ mod tests {
         // API sees it, though the API never held the session.
         let edited = view(ok(api.dispatch(Request::EditApply {
             path: path.clone(),
-            command: Box::new(Command::AddMedia { item: still("/x/still.png") }),
+            command: Box::new(Command::AddMedia {
+                item: still("/x/still.png"),
+            }),
         })));
         assert_eq!(edited.project.media.len(), 1);
         assert_eq!(window.edits.load(std::sync::atomic::Ordering::SeqCst), 1);
@@ -1497,11 +1544,17 @@ mod tests {
         // The window's own undo, and its own save.
         let undone = view(ok(api.dispatch(Request::EditUndo { path: path.clone() })));
         assert!(undone.project.media.is_empty());
-        ok(api.dispatch(Request::ProjectSave { path: path.clone(), name: None }));
+        ok(api.dispatch(Request::ProjectSave {
+            path: path.clone(),
+            name: None,
+        }));
         assert_eq!(window.saves.load(std::sync::atomic::Ordering::SeqCst), 1);
 
         // Closing from the API does not close the window's project.
-        ok(api.dispatch(Request::ProjectClose { path: path.clone(), save: true }));
+        ok(api.dispatch(Request::ProjectClose {
+            path: path.clone(),
+            save: true,
+        }));
         assert_eq!(window.saves.load(std::sync::atomic::Ordering::SeqCst), 1);
         let again = view(ok(api.dispatch(Request::ProjectGet { path })));
         assert!(again.project.media.is_empty());
@@ -1522,7 +1575,9 @@ mod tests {
         api.set_live(window.clone());
         view(ok(api.dispatch(Request::EditApply {
             path,
-            command: Box::new(Command::AddMedia { item: still("/x/still.png") }),
+            command: Box::new(Command::AddMedia {
+                item: still("/x/still.png"),
+            }),
         })));
         assert_eq!(window.edits.load(std::sync::atomic::Ordering::SeqCst), 0);
     }

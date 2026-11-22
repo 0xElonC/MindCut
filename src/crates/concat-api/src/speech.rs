@@ -16,7 +16,9 @@ use concat_speech::tts::{self, Family, ModelStatus, SpeakRequest, Speech};
 use serde_json::{Value, json};
 use tempfile::NamedTempFile;
 
-use crate::{Api, ApiError, ErrorCode, Event, JobStatus, Live, Started, key_of, not_open, refused};
+use crate::{
+    Api, ApiError, ErrorCode, Event, Holder, JobStatus, Live, Started, key_of, not_open, refused,
+};
 
 type Progress = Box<dyn FnMut(JobStage) + Send>;
 
@@ -153,6 +155,7 @@ impl Api {
         text: String,
         voice_id: i32,
         speed: Option<f32>,
+        live: Option<Arc<dyn Live>>,
     ) -> Result<Started, ApiError> {
         if text.trim().is_empty() {
             return Err(ApiError::invalid("speech text is empty"));
@@ -178,7 +181,7 @@ impl Api {
             speed,
             project,
         };
-        self.start_speech_job(path, cancel, move |target, progress| {
+        self.start_speech_job(path, live, cancel, move |target, progress| {
             // The engine can return platform/provider errors. Keep any caller
             // text those errors may contain out of events and transport logs.
             run.speak(&dirs, &request, target, progress)
@@ -194,16 +197,23 @@ impl Api {
     fn start_speech_job(
         &mut self,
         path: &str,
+        live: Option<Arc<dyn Live>>,
         cancel: Arc<AtomicBool>,
         speak: impl FnOnce(&Path, Progress) -> Result<(), ApiError> + Send + 'static,
     ) -> Result<Started, ApiError> {
-        let project = Path::new(self.session(path)?.path())
+        let session = self.session(path)?;
+        if key_of(session.path()) != key_of(path)
+            || (live.is_none() && self.open.holder(path) != Some(Holder::Api))
+        {
+            // A cached live snapshot cannot be used as a headless session.
+            return Err(not_open(path));
+        }
+        let project = Path::new(session.path())
             .canonicalize()
             .map_err(audio_error)?;
         let path = project
             .to_str()
             .ok_or_else(|| ApiError::invalid("project path is not UTF-8"))?;
-        let live = self.live_at(path);
         let audio = project.join("audio");
         self.writable(path)?;
         self.writable(
@@ -341,6 +351,9 @@ impl Api {
         let view = if let Some(live) = live {
             live.apply_to(path, command).map_err(refused)?
         } else {
+            if self.open.holder(path) != Some(Holder::Api) {
+                return Err(not_open(path));
+            }
             let session = self
                 .sessions
                 .get_mut(&key_of(path))
@@ -462,6 +475,7 @@ mod tests {
         let started = api
             .start_speech_job(
                 &path,
+                None,
                 Arc::new(AtomicBool::new(false)),
                 move |file, mut progress| {
                     progress(JobStage::Working {
@@ -508,6 +522,26 @@ mod tests {
         assert!(view.project.active().clips.is_empty());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_speech_job_refuses_audio_redirected_outside_the_project() {
+        let (mut api, scratch, path) = setup(Arc::new(|_| {}));
+        let elsewhere = scratch.path().join("elsewhere");
+        std::fs::create_dir(&elsewhere).expect("redirect destination");
+        std::os::unix::fs::symlink(&elsewhere, Path::new(&path).join("audio"))
+            .expect("redirect audio");
+        let error = api
+            .start_speech_job(&path, None, Arc::new(AtomicBool::new(false)), |_, _| {
+                panic!("redirected audio must not reach the worker")
+            })
+            .expect_err("audio folder must stay in the project");
+        assert_eq!(error.code, ErrorCode::Refused);
+        assert_eq!(
+            std::fs::read_dir(&elsewhere).expect("destination").count(),
+            0
+        );
+    }
+
     #[test]
     fn cancelling_a_speech_job_removes_the_unimported_file() {
         let (tx, rx) = mpsc::channel();
@@ -518,6 +552,7 @@ mod tests {
         let started = api
             .start_speech_job(
                 &path,
+                None,
                 Arc::new(AtomicBool::new(false)),
                 move |file, mut progress| {
                     progress(JobStage::Loading);
