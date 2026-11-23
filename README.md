@@ -24,6 +24,7 @@ The agent is the **[Codex](https://developers.openai.com/codex/cli) already inst
 - **Photos, videos and files.** Attach with the paperclip, or drag files onto the window after clicking in the message box. Photos are shown to the model; videos and other files are handed over as paths, to be imported with the tools.
 - **Skills.** The wand button beside the paperclip lists the skills your Codex has, with a search. Pick one or more and they go with the message as pills above the message box.
 - **Model and depth.** Pick the model and the reasoning depth beside the message box. The first choice is whatever your own Codex settings use.
+- **Other agents.** Besides Codex, the pane can run on the Claude Code or Antigravity (`agy`) already installed on your computer. Switch in the provider menu of the pane. Each keeps its own sign-in, and a conversation stays with the agent it began on.
 - **Conversations.** Start, search, rename, delete and resume conversations from the clock button. A conversation comes back with its whole history.
 - **Free to act.** The agent runs without approval prompts and its commands are not sandboxed: it can do on this computer what you can. Turn Live off and read what it does if that is not what you want.
 
@@ -90,6 +91,7 @@ MindCut is free software under [AGPL-3.0-or-later](LICENSE), as Concat is. If yo
 - **照片、视频、文件**:点回形针添加,或在消息框里点一下后把文件拖进窗口。照片会直接给模型看,视频和其他文件以路径交给它,由它用工具导入。
 - **技能(Skill)**:回形针旁的魔法棒按钮会列出你 Codex 里的技能,可搜索;选中的技能以标签形式随消息一起发送。
 - **模型与推理深度**:在消息框旁选择,默认就是你自己 Codex 配置里的那个。
+- **其他智能体**:除了 Codex,面板也可以改用本机已安装的 Claude Code 或 Antigravity(`agy`),在面板的提供方菜单里切换。它们各自使用自己的登录,一段对话会一直用开始时的那个智能体。
 - **对话管理**:点时钟按钮新建、搜索、重命名、删除、恢复对话,恢复后保留完整历史。
 - **可自由执行**:智能体不会弹审批,命令也没有沙盒,它能在这台电脑上做你能做的事。不放心就关掉 Live 并留意它的操作。
 

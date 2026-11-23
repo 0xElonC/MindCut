@@ -25,12 +25,15 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use concat_agent::acp::{self, Client};
+use concat_agent::antigravity;
 use concat_agent::backend::{
     Availability, Backend, CodexBackend, Defaults, Done, Event, NamedMcpServer, OnEvent, Provider,
     SessionSetup,
 };
 use concat_agent::claude::ClaudeBackend;
 use concat_agent::store::{Chat, Store};
+use concat_agent::transcript::Transcripts;
 use concat_agent::wire::{self, Input, Item, McpServer, Model, Skill, ToolState, Update};
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 
@@ -94,12 +97,13 @@ enum Link {
     Ready,
 }
 
-const PROVIDERS: [Provider; 2] = [Provider::Codex, Provider::Claude];
+const PROVIDERS: [Provider; 3] = [Provider::Codex, Provider::Claude, Provider::Antigravity];
 
 fn provider_index(provider: Provider) -> usize {
     match provider {
         Provider::Codex => 0,
         Provider::Claude => 1,
+        Provider::Antigravity => 2,
     }
 }
 
@@ -107,6 +111,51 @@ fn provider_label(provider: Provider) -> &'static str {
     match provider {
         Provider::Codex => "Codex",
         Provider::Claude => "Claude",
+        Provider::Antigravity => antigravity::NAME,
+    }
+}
+
+/// What a provider other than Codex says while it is not ready.
+struct Texts {
+    connecting: String,
+    connecting_body: String,
+    missing_title: String,
+    missing_body: String,
+    unavailable_title: String,
+    unavailable_body: String,
+    /// What to tell a person who is about to use it, if anything.
+    notice: Option<String>,
+}
+
+/// `None` for Codex, whose words are the pane's own.
+fn texts(provider: Provider) -> Option<Texts> {
+    match provider {
+        Provider::Codex => None,
+        Provider::Claude => Some(Texts {
+            connecting: t("agent.claudeConnecting"),
+            connecting_body: t("agent.claudeConnectingBody"),
+            missing_title: t("agent.claudeMissingTitle"),
+            missing_body: t("agent.claudeMissingBody"),
+            unavailable_title: t("agent.claudeUnavailableTitle"),
+            unavailable_body: t("agent.claudeUnavailableBody"),
+            notice: Some(t("agent.claudeTerms")),
+        }),
+        Provider::Antigravity => {
+            let name = antigravity::NAME;
+            Some(Texts {
+                connecting: tf("agent.programConnecting", &[&name]),
+                connecting_body: tf("agent.programConnectingBody", &[&name]),
+                missing_title: tf("agent.programMissingTitle", &[&name]),
+                missing_body: format!(
+                    "{}\n{}",
+                    tf("agent.programMissingBody", &[&name]),
+                    tf("agent.installWith", &[&antigravity::INSTALL_COMMAND]),
+                ),
+                unavailable_title: tf("agent.programFailedTitle", &[&name]),
+                unavailable_body: t("agent.failedBody"),
+                notice: None,
+            })
+        }
     }
 }
 
@@ -117,25 +166,23 @@ fn status_view(provider: Provider, link: &Link) -> (AgentStatus, String, String)
         Link::Failed(reason) => (AgentStatus::Failed, reason.as_str()),
         Link::Ready => (AgentStatus::Ready, ""),
     };
-    if provider == Provider::Codex || status == AgentStatus::Ready {
+    let Some(texts) = texts(provider).filter(|_| status != AgentStatus::Ready) else {
         return (status, String::new(), reason.into());
-    }
-    let (title, details) = match status {
-        AgentStatus::Connecting => ("agent.claudeConnecting", "agent.claudeConnectingBody"),
-        AgentStatus::Missing => ("agent.claudeMissingTitle", "agent.claudeMissingBody"),
-        _ => (
-            "agent.claudeUnavailableTitle",
-            "agent.claudeUnavailableBody",
-        ),
     };
-    let mut detail = t(details);
+    let (title, mut detail) = match status {
+        AgentStatus::Connecting => (texts.connecting, texts.connecting_body),
+        AgentStatus::Missing => (texts.missing_title, texts.missing_body),
+        _ => (texts.unavailable_title, texts.unavailable_body),
+    };
     if !reason.is_empty() {
         detail.push_str(&format!("\n{reason}"));
     }
-    if matches!(status, AgentStatus::Missing | AgentStatus::Failed) {
-        detail.push_str(&format!("\n{}", t("agent.claudeTerms")));
+    if matches!(status, AgentStatus::Missing | AgentStatus::Failed)
+        && let Some(notice) = texts.notice
+    {
+        detail.push_str(&format!("\n{notice}"));
     }
-    (status, t(title), detail)
+    (status, title, detail)
 }
 
 fn connect_backend(
@@ -168,6 +215,33 @@ fn connect_backend(
                 .ok_or_else(|| Link::Failed("The settings folder is unavailable.".into()))?;
             Ok(Arc::new(ClaudeBackend::new(program, history, on_event)))
         }
+        Provider::Antigravity => {
+            let program = antigravity::locate().ok_or(Link::Missing)?;
+            // The program does not keep a conversation's history, so the
+            // app keeps its own, beside the Claude one.
+            let folder = history
+                .as_deref()
+                .and_then(Path::parent)
+                .map(|config| config.join("agent-antigravity"))
+                .ok_or_else(|| Link::Failed("The settings folder is unavailable.".into()))?;
+            log::info!("agent: starting {}", program.display());
+            let client = Client {
+                name: "eloncut".into(),
+                title: "MindCut".into(),
+                version: env!("CARGO_PKG_VERSION").into(),
+            };
+            let backend = acp::connect(
+                Provider::Antigravity,
+                antigravity::NAME,
+                &antigravity::PROFILE,
+                &program,
+                &client,
+                Transcripts::in_folder(&folder),
+                on_event,
+            )
+            .map_err(Link::Failed)?;
+            Ok(Arc::new(backend))
+        }
     }
 }
 
@@ -175,13 +249,20 @@ fn probe_backend(provider: Provider) -> Availability {
     match provider {
         Provider::Codex => CodexBackend::status(),
         Provider::Claude => ClaudeBackend::status(),
+        Provider::Antigravity => {
+            if antigravity::locate().is_some() {
+                Availability::Available
+            } else {
+                Availability::NotInstalled
+            }
+        }
     }
 }
 
 struct Controller {
     link: Link,
     provider: Provider,
-    availability: [Option<Availability>; 2],
+    availability: [Option<Availability>; PROVIDERS.len()],
     backend: Option<Arc<dyn Backend>>,
     history: Option<PathBuf>,
     generation: u64,
@@ -189,7 +270,7 @@ struct Controller {
     models: Vec<Model>,
     /// What the person's own Codex settings choose.
     defaults: Defaults,
-    choices: [Defaults; 2],
+    choices: [Defaults; PROVIDERS.len()],
     model: usize,
     effort: usize,
     store: Store,
@@ -403,7 +484,7 @@ impl Controller {
         Self {
             link: Link::Starting,
             provider: Provider::default(),
-            availability: [None, None],
+            availability: Default::default(),
             backend: None,
             history,
             generation: 0,
@@ -448,7 +529,7 @@ impl Controller {
             .map(|model| model.efforts.clone())
             .unwrap_or_else(|| match self.provider {
                 Provider::Codex => wire::COMMON_EFFORTS.map(str::to_owned).to_vec(),
-                Provider::Claude => Vec::new(),
+                Provider::Claude | Provider::Antigravity => Vec::new(),
             })
     }
 
@@ -499,15 +580,18 @@ impl Controller {
             .into_iter()
             .map(|provider| {
                 let status = &self.availability[provider_index(provider)];
+                let texts = texts(provider);
                 let reason = match status {
                     Some(Availability::Available) => String::new(),
                     Some(Availability::Unavailable(reason)) => reason.clone(),
-                    Some(Availability::NotInstalled) if provider == Provider::Claude => {
-                        t("agent.claudeMissingTitle")
-                    }
-                    Some(Availability::NotInstalled) => t("agent.missingTitle"),
-                    None if provider == Provider::Claude => t("agent.claudeConnecting"),
-                    None => t("agent.connecting"),
+                    Some(Availability::NotInstalled) => match texts {
+                        Some(texts) => texts.missing_title,
+                        None => t("agent.missingTitle"),
+                    },
+                    None => match texts {
+                        Some(texts) => texts.connecting,
+                        None => t("agent.connecting"),
+                    },
                 };
                 AgentProviderOption {
                     id: provider.as_str().into(),
@@ -762,19 +846,20 @@ impl Controller {
     }
 
     fn probe_other(&self) {
-        let provider = match self.provider {
-            Provider::Codex => Provider::Claude,
-            Provider::Claude => Provider::Codex,
-        };
-        std::thread::spawn(move || {
-            let status = probe_backend(provider);
-            post(move |c, shell, app| {
-                if c.provider != provider {
-                    c.availability[provider_index(provider)] = Some(status);
-                    c.publish(shell, app);
-                }
+        for provider in PROVIDERS
+            .into_iter()
+            .filter(|other| *other != self.provider)
+        {
+            std::thread::spawn(move || {
+                let status = probe_backend(provider);
+                post(move |c, shell, app| {
+                    if c.provider != provider {
+                        c.availability[provider_index(provider)] = Some(status);
+                        c.publish(shell, app);
+                    }
+                });
             });
-        });
+        }
     }
 
     fn heard(&mut self, generation: u64, event: Event) -> bool {
@@ -904,15 +989,25 @@ impl Controller {
                 });
             }
             // Our own message is on screen already.
-            Update::ItemStarted { item: Item::User { .. }, .. }
-            | Update::ItemDone { item: Item::User { .. }, .. } => {}
+            Update::ItemStarted {
+                item: Item::User { .. },
+                ..
+            }
+            | Update::ItemDone {
+                item: Item::User { .. },
+                ..
+            } => {}
             Update::ItemStarted { thread, item } if ours(&thread, &self.current) => {
                 self.put_item(&item, false);
             }
             Update::ItemDone { thread, item } if ours(&thread, &self.current) => {
                 self.put_item(&item, true);
             }
-            Update::AgentWords { thread, item, words } if ours(&thread, &self.current) => {
+            Update::AgentWords {
+                thread,
+                item,
+                words,
+            } if ours(&thread, &self.current) => {
                 match self.lines.iter_mut().find(|line| line.id == item) {
                     Some(line) => line.text.push_str(&words),
                     None => {
@@ -923,7 +1018,11 @@ impl Controller {
                     }
                 }
             }
-            Update::ThoughtWords { thread, item, words } if ours(&thread, &self.current) => {
+            Update::ThoughtWords {
+                thread,
+                item,
+                words,
+            } if ours(&thread, &self.current) => {
                 match self.lines.iter_mut().find(|line| line.id == item) {
                     Some(line) => line.reasoning.push_str(&words),
                     None => {
@@ -980,8 +1079,13 @@ impl Controller {
             })?;
             self.bridge = Some(server);
         }
-        let server = self.bridge.as_ref().ok_or("the editor's API is not running")?;
-        let address = server.json_addr().ok_or("the editor's API has no address")?;
+        let server = self
+            .bridge
+            .as_ref()
+            .ok_or("the editor's API is not running")?;
+        let address = server
+            .json_addr()
+            .ok_or("the editor's API has no address")?;
         let program = std::env::current_exe()
             .map_err(|error| format!("this program cannot be found: {error}"))?;
         Ok(McpServer {
@@ -1513,7 +1617,11 @@ pub fn install(app: &App) {
     });
     chat.on_skill_add(|name| {
         with(|c, shell, app| {
-            if let Some(skill) = c.skills.iter().find(|skill| skill.name == name.as_str()).cloned()
+            if let Some(skill) = c
+                .skills
+                .iter()
+                .find(|skill| skill.name == name.as_str())
+                .cloned()
                 && !c.picked.iter().any(|picked| picked.name == skill.name)
             {
                 c.picked.push(skill);
@@ -1572,6 +1680,7 @@ pub fn install(app: &App) {
             let link = match c.provider {
                 Provider::Codex => "https://developers.openai.com/codex/cli",
                 Provider::Claude => "https://code.claude.com/docs/en/quickstart",
+                Provider::Antigravity => antigravity::INSTALL_URL,
             };
             let _ = opener::open(link);
         });
@@ -1834,7 +1943,11 @@ mod tests {
     fn claude_turn_drives_controller_updates_and_blocks_provider_switching() {
         let (send, receive) = std::sync::mpsc::channel();
         let mut controller = Controller::new(Store::in_memory(), None);
-        controller.availability = [Some(Availability::Available), Some(Availability::Available)];
+        controller.availability = [
+            Some(Availability::Available),
+            Some(Availability::Available),
+            None,
+        ];
         assert!(controller.can_select_provider(Provider::Claude));
         controller.change_provider(Provider::Claude);
         let backend = Arc::new(TestBackend {
@@ -1953,7 +2066,10 @@ mod tests {
 
     #[test]
     fn markdown_marks_do_not_show_as_stray_characters() {
-        assert_eq!(plain("已经剪成 **5.5 秒** 的片子"), "已经剪成 5.5 秒 的片子");
+        assert_eq!(
+            plain("已经剪成 **5.5 秒** 的片子"),
+            "已经剪成 5.5 秒 的片子"
+        );
         assert_eq!(plain("## 步骤\n- 一\n* 二"), "步骤\n• 一\n• 二");
         assert_eq!(plain("plain"), "plain");
     }

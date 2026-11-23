@@ -12,6 +12,7 @@ pub enum Provider {
     #[default]
     Codex,
     Claude,
+    Antigravity,
 }
 
 impl Provider {
@@ -19,6 +20,7 @@ impl Provider {
         match self {
             Self::Codex => "codex",
             Self::Claude => "claude",
+            Self::Antigravity => "antigravity",
         }
     }
 
@@ -26,6 +28,7 @@ impl Provider {
         match id {
             "codex" => Some(Self::Codex),
             "claude" => Some(Self::Claude),
+            "antigravity" => Some(Self::Antigravity),
             _ => None,
         }
     }
@@ -72,6 +75,7 @@ pub struct Session {
     pub history: Vec<Item>,
 }
 
+#[derive(Debug)]
 pub enum Event {
     Update(Update),
     Closed(String),

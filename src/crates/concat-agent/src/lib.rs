@@ -4,8 +4,9 @@
 //! The agent behind the window's chat.
 //!
 //! [`backend`] defines the window's interface to the installed CLI backends.
-//! Codex uses its app-server; [`claude`] uses Claude Code's stream-json mode.
-//! Both emit the same [`wire::Update`] vocabulary without exposing sign-in.
+//! Codex uses its app-server; [`claude`] uses Claude Code's stream-json mode;
+//! [`acp`] speaks the Agent Client Protocol, for [`antigravity`]'s `agy`.
+//! All emit the same [`wire::Update`] vocabulary without exposing sign-in.
 //!
 //! - [`locate`] finds the `codex` program.
 //! - [`rpc`] is the process and the request/response plumbing.
@@ -21,9 +22,13 @@
 // them; their fields say what they are, and each type says what it is for.
 #![allow(missing_docs)]
 
+pub mod acp;
+pub mod antigravity;
 pub mod backend;
 pub mod claude;
 pub mod locate;
+pub mod peer;
 pub mod rpc;
 pub mod store;
+pub mod transcript;
 pub mod wire;
